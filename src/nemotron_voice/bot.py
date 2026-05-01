@@ -391,13 +391,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                     audio_collector,
                     llm,
                     tts,
-                    transport.output(),
-                    assistant_aggregator,
                 ],
                 [
                     stt,
                 ],
             ),
+            transport.output(),
+            assistant_aggregator,
         ]
     )
 

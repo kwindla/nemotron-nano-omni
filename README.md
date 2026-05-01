@@ -77,13 +77,18 @@ separate ASR pipleine lane runs Nemotron Speech for streaming UI
 transcription.
 
 The Pipecat bot runs `user_aggregator` before the `ParallelPipeline` so typed
-RTVI messages between the client and server, VAD, and audio-only Smart Turn end-of-turn detection are handled once before fan-out. The raw/generation lane owns audio collection, LLM inference, TTS, and assistant context aggregation. The ASR lane receives the same
+RTVI messages between the client and server, VAD, and audio-only Smart Turn
+end-of-turn detection are handled once before fan-out. The raw/generation lane
+owns audio collection, LLM inference, and TTS. The ASR lane receives the same
 post-aggregator audio/control frames and emits interim/final transcript frames
-for display.
+for display. The branches then rejoin for browser output and assistant context
+aggregation, matching the normal Pipecat pipeline shape.
 
-We use a custom audio-only Smart Turn user speaking stop strategy, because the standard Smart Turn strategy gates on both audio and transcription frames.`user_aggregator` is upstream of the parallel pipeline the fan-out, so the ASR service also
-sees the completed `UserStoppedSpeakingFrame` and uses it to finalize/reset
-utterances.
+We use a custom audio-only Smart Turn user speaking stop strategy, because the
+standard Smart Turn strategy gates on both audio and transcription frames.
+`user_aggregator` is upstream of the parallel pipeline fan-out, so the ASR
+service also sees the completed `UserStoppedSpeakingFrame` and uses it to
+finalize/reset utterances.
 
 ```python
 pipeline = Pipeline(
@@ -95,13 +100,13 @@ pipeline = Pipeline(
                 audio_collector,
                 llm,
                 tts,
-                transport.output(),
-                assistant_aggregator,
             ],
             [
                 stt,
             ],
         ),
+        transport.output(),
+        assistant_aggregator,
     ]
 )
 ```
@@ -116,10 +121,8 @@ flowchart TD
     AudioCollector["UserAudioContextCollector<br/>commits spoken audio turn"]
     LLM["NemotronOmniAudioLLMService<br/>Nemotron Nano Omni via vLLM<br/>conversation_id cache + bash tool"]
     TTS["Kyutai Pocket TTS"]
-    TransportOut["transport.output()"]
-    AssistantAgg["assistant_aggregator<br/>commits assistant text to LLMContext"]
 
-    AudioCollector --> LLM --> TTS --> TransportOut --> AssistantAgg
+    AudioCollector --> LLM --> TTS
   end
 
   subgraph AsrLane["ASR display lane"]
@@ -132,9 +135,11 @@ flowchart TD
   Parallel --> AudioCollector
   Parallel --> STT
 
+  Parallel --> TransportOut["transport.output()"]
+  TransportOut --> AssistantAgg["assistant_aggregator<br/>commits assistant text to LLMContext"]
+  TransportOut --> Browser
   AudioCollector -. "push_context_frame()" .-> UserAgg
   UserAgg -. "LLMContextFrame" .-> Parallel
-  TransportOut --> Browser
   TranscriptFrames -. "display" .-> RTVI["RTVI observers and client panels"]
   LLM -. "streaming botOutput text" .-> RTVI
 ```
