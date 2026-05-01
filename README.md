@@ -135,7 +135,8 @@ flowchart TD
   Parallel --> AudioCollector
   Parallel --> STT
 
-  Parallel --> TransportOut["transport.output()"]
+  TTS --> TransportOut["transport.output()"]
+  TranscriptFrames --> TransportOut
   TransportOut --> AssistantAgg["assistant_aggregator<br/>commits assistant text to LLMContext"]
   TransportOut --> Browser
   AudioCollector -. "push_context_frame()" .-> UserAgg
