@@ -94,7 +94,10 @@ class ASRServer:
         model_ref_is_path = self.model_name_or_path.endswith(".nemo") or os.path.exists(
             self.model_name_or_path
         )
-        map_location = torch.device(self.device)
+        # Restoring directly onto CUDA causes PyTorch to keep a much larger
+        # reserved pool for this NeMo checkpoint. Restore on CPU first, then
+        # move the model to the requested device.
+        map_location = "cpu"
 
         if model_ref_is_path:
             logger.info(f"Loading ASR model from {self.model_name_or_path}")
@@ -521,4 +524,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
