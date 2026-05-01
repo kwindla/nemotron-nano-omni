@@ -207,7 +207,7 @@ async def main_async(args: argparse.Namespace):
             stage_name = "Stage 2"
             log_patterns.extend(
                 [
-                    "TurnAnalyzerUserTurnStopStrategy",
+                    "AudioOnlySmartTurnStopStrategy",
                     "UserStoppedSpeakingFrame",
                     "Added user audio turn to LLM context",
                     "sending context with",

@@ -1,38 +1,22 @@
 # Nemotron Nano Omni Local Voice Stack
 
-This workspace runs a local browser voice agent on a single RTX 5090-class
-machine:
+This project implements a local voice agent, using the Nemotron Nano Omni multi-modal LLM running on an NVIDIA RTX 5090:
 
 - vLLM serves `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4`.
-- The Pipecat bot captures browser audio over SmallWebRTC.
-- A local Nemotron Speech ASR server streams user transcripts.
-- Pocket TTS runs as a CPU sidecar.
+- Kyutai's Pocket TTS generates voice output (running on CPU).
+- NVIDIA Nemotron Speech ASR generates streaming text transcripts for display in the UI.
+- Pipecat orchestrates the streaming data flowing through the models, manages context, and handles tool calling.
 
-The top-level directory is a meta-workspace. The vLLM and Pipecat source trees
-are nested, version-pinned dependency checkouts. Project-owned bot code and
-Pipecat services live in `src/nemotron_voice`; the Pipecat checkout is read-only
-reference/runtime code.
+This bot is very fast. Typically 125ms TTFT from Nemotron Nano Omni, and 40ms TTFB from Kyutai Pocket TTS. Complete voice-to-voice response time is about 500ms. This would be *too fast* without good end of turn detection.
+
+The bot implements a bash tool for access to the local system. (Be careful with this!)
 
 ## Full Text And Audio Prefix Caching
 
-This repo patches vLLM with a conversation prefix cache for Nemotron Nano Omni.
-The patch is separate from vLLM's standard hash-prefix cache: it stores exact
-committed conversation prefixes by `conversation_id`, including both text tokens
-and audio-derived multimodal state.
+We patch vLLM to implement full prefix caching for Nemotron Nano Omni.
+This patch is separate from vLLM's standard hash-prefix cache, which is not fully implemented for the hybrid Nemotron architecture. We know exactly what kind of caching we want for our multi-turn conversation use case, so we can implement complete caching and a chat-completions protocol extension.
 
-The first request for a conversation sends the full context. After that, the
-Pipecat LLM service sends only the latest user suffix and marks the request as
-requiring the existing conversation cache entry. vLLM reconstructs the full
-prompt from its committed frontend ledger, attaches the cached engine KV/Mamba
-state, and computes only the new suffix. When the requested cache ID is missing,
-vLLM returns a cache-miss response and the Pipecat service retries once with the
-full context.
-
-The cache is bounded by maximum entries, maximum prompt tokens, and KV free-block
-headroom. When it needs space, vLLM evicts old committed conversation IDs and
-keeps the requested ID when possible. Audio turns are cached with the same
-conversation messages as text turns, so old audio does not need to be resent on
-normal suffix-only turns.
+Chat completions requests can include a `conversation_id` field to enable prefix caching. For cached conversations, we save the full KV/Mamba state each time the model completes a conversation turn response.
 
 ### Chat Completions Protocol Extension
 
@@ -87,52 +71,73 @@ rejected with HTTP `409`.
 
 ## Pipecat Pipeline Dataflow
 
-Nemotron Nano Omni is the speech-aware LLM in the middle of the stack: it takes
-the user's audio turn as model input and streams assistant text as model output.
-The local ASR sidecar runs `nvidia/nemotron-speech-streaming-en-0.6b` to produce
-streaming user transcripts for display and debugging; those transcripts are not
-the primary input to the LLM. The TTS sidecar uses Kyutai Pocket TTS
-(`kyutai/pocket-tts-without-voice-cloning`) to turn the LLM text back into bot
-audio.
+We send user speech to Nemotron Nano Omni directly. The LLM responds with text,
+which is sent to Kyutai Pocket TTS to generate output audio. The
+separate ASR pipleine lane runs Nemotron Speech for streaming UI
+transcription.
 
-The Pipecat bot uses a `ParallelPipeline` so UI-facing text and generation can
-move at the same time. One lane carries the turn-complete audio context into
-Nemotron Nano Omni, streams LLM text onward to TTS, and records the assistant
-message. The side lane filters transcription frames for RTVI observers and the
-custom client, which lets the UI show live user/assistant text without making
-ASR text drive the audio-language model path.
+The Pipecat bot runs `user_aggregator` before the `ParallelPipeline` so typed
+RTVI messages between the client and server, VAD, and audio-only Smart Turn end-of-turn detection are handled once before fan-out. The raw/generation lane owns audio collection, LLM inference, TTS, and assistant context aggregation. The ASR lane receives the same
+post-aggregator audio/control frames and emits interim/final transcript frames
+for display.
+
+We use a custom audio-only Smart Turn user speaking stop strategy, because the standard Smart Turn strategy gates on both audio and transcription frames.`user_aggregator` is upstream of the parallel pipeline the fan-out, so the ASR service also
+sees the completed `UserStoppedSpeakingFrame` and uses it to finalize/reset
+utterances.
+
+```python
+pipeline = Pipeline(
+    [
+        transport.input(),
+        user_aggregator,
+        ParallelPipeline(
+            [
+                audio_collector,
+                llm,
+                tts,
+                transport.output(),
+                assistant_aggregator,
+            ],
+            [
+                stt,
+            ],
+        ),
+    ]
+)
+```
 
 ```mermaid
 flowchart TD
-  Browser["Browser / custom React client<br/>SmallWebRTC media + RTVI events"] --> TransportIn["transport.input()"]
-  TransportIn --> STT["Nemotron Speech STT<br/>audio_passthrough=True"]
-  STT --> TextInput["TextInputContextCollector<br/>typed RTVI messages -> LLMContext"]
-  TextInput --> Parallel["ParallelPipeline"]
+  Browser["Browser / custom React client<br/>WebRTC audio + typed RTVI text"] --> TransportIn["transport.input()"]
+  TransportIn --> UserAgg["user_aggregator<br/>typed RTVI text + Silero VAD<br/>audio-only Smart Turn stop strategy"]
+  UserAgg --> Parallel["ParallelPipeline<br/>fan out audio + turn-control frames"]
 
-  Parallel --> MainLane["Main generation lane"]
-  MainLane --> UserAgg["user_aggregator<br/>Silero VAD + local smart turn"]
-  UserAgg --> AudioCollector["UserAudioContextCollector<br/>user audio turn -> LLMContext"]
-  AudioCollector --> LLM["NemotronOmniAudioLLMService<br/>vLLM chat/completions + bash tool"]
-  LLM --> TTS["Pocket TTS"]
-  TTS --> TransportOut["transport.output()"]
+  subgraph RawLane["Raw / generation lane"]
+    AudioCollector["UserAudioContextCollector<br/>commits spoken audio turn"]
+    LLM["NemotronOmniAudioLLMService<br/>Nemotron Nano Omni via vLLM<br/>conversation_id cache + bash tool"]
+    TTS["Kyutai Pocket TTS"]
+    TransportOut["transport.output()"]
+    AssistantAgg["assistant_aggregator<br/>commits assistant text to LLMContext"]
+
+    AudioCollector --> LLM --> TTS --> TransportOut --> AssistantAgg
+  end
+
+  subgraph AsrLane["ASR display lane"]
+    STT["Nemotron Speech STT<br/>finalizes on UserStoppedSpeakingFrame"]
+    TranscriptFrames["interim/final transcription frames"]
+
+    STT --> TranscriptFrames
+  end
+
+  Parallel --> AudioCollector
+  Parallel --> STT
+
+  AudioCollector -. "push_context_frame()" .-> UserAgg
+  UserAgg -. "LLMContextFrame" .-> Parallel
   TransportOut --> Browser
-  TransportOut --> AssistantAgg["assistant_aggregator<br/>assistant text -> LLMContext"]
-
-  Parallel --> TranscriptLane["Transcript side lane"]
-  TranscriptLane --> TranscriptFilter["FrameFilter<br/>interim/final transcription frames"]
-  TranscriptFilter --> RTVI["RTVI observers and client panels"]
+  TranscriptFrames -. "display" .-> RTVI["RTVI observers and client panels"]
+  LLM -. "streaming botOutput text" .-> RTVI
 ```
-
-- The STT service emits transcription frames while passing audio through to the
-  rest of the pipeline.
-- The transcript side lane keeps interim and final transcript events visible in
-  RTVI/client panels without feeding those transcript frames into TTS.
-- The main lane waits for turn completion, stores the user audio turn in
-  `LLMContext`, calls vLLM, speaks the assistant response, and records that
-  assistant message back into `LLMContext`.
-- The LLM service uses the vLLM conversation cache after the first committed
-  turn and retries with full context if vLLM reports that the requested cache ID
-  was evicted or never existed.
 
 ## Dependency Pins
 

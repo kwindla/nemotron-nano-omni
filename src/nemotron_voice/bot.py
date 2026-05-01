@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from loguru import logger
 
 from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+from pipecat.audio.turn.base_turn_analyzer import BaseTurnAnalyzer, EndOfTurnState
 from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     CancelFrame,
@@ -23,12 +24,13 @@ from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
     InterimTranscriptionFrame,
-    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMMessagesAppendFrame,
     LLMTextFrame,
     MetricsFrame,
+    SpeechControlParamsFrame,
+    StartFrame,
     TranscriptionFrame,
     TTSAudioRawFrame,
     TTSTextFrame,
@@ -49,7 +51,6 @@ from pipecat.processors.aggregators.llm_response_universal import (
     LLMUserAggregator,
     LLMUserAggregatorParams,
 )
-from pipecat.processors.filters.frame_filter import FrameFilter
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi.processor import RTVIProcessor
 from pipecat.runner.types import RunnerArguments
@@ -64,7 +65,7 @@ from nemotron_voice.services.nvidia.nemotron_tts import NemotronMagpieWebSocketT
 from pipecat.services.tts_service import TextAggregationMode
 from pipecat.transcriptions.language import Language
 from pipecat.transports.base_transport import BaseTransport, TransportParams
-from pipecat.turns.user_stop import TurnAnalyzerUserTurnStopStrategy
+from pipecat.turns.user_stop import BaseUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
 
 _FILE_LOGGER_ID: int | None = None
@@ -197,6 +198,56 @@ class SmartTurnRTVIObserver(BaseObserver):
             logger.debug(f"Sent Smart Turn RTVI server message: {payload}")
 
 
+class AudioOnlySmartTurnStopStrategy(BaseUserTurnStopStrategy):
+    """Stop a user turn from Smart Turn's audio classification only."""
+
+    def __init__(self, *, turn_analyzer: BaseTurnAnalyzer, **kwargs):
+        super().__init__(**kwargs)
+        self._turn_analyzer = turn_analyzer
+        self._vad_user_speaking = False
+
+    async def reset(self):
+        await super().reset()
+        self._vad_user_speaking = False
+
+    async def cleanup(self):
+        await super().cleanup()
+        await self._turn_analyzer.cleanup()
+
+    async def process_frame(self, frame: Frame):
+        await super().process_frame(frame)
+
+        if isinstance(frame, StartFrame):
+            await self._start(frame)
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
+            self._turn_analyzer.update_vad_start_secs(frame.start_secs)
+            self._vad_user_speaking = True
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._vad_user_speaking = False
+            await self._analyze_end_of_turn()
+        elif isinstance(frame, InputAudioRawFrame):
+            self._turn_analyzer.append_audio(frame.audio, self._vad_user_speaking)
+
+    async def _start(self, frame: StartFrame):
+        self._turn_analyzer.set_sample_rate(frame.audio_in_sample_rate)
+        await self.broadcast_frame(
+            SpeechControlParamsFrame, turn_params=self._turn_analyzer.params
+        )
+
+    async def _analyze_end_of_turn(self):
+        state, result = await self._turn_analyzer.analyze_end_of_turn()
+        if result:
+            await self.push_frame(MetricsFrame(data=[result]))
+
+        # Only trigger from the model classification result. BaseSmartTurn can
+        # also return COMPLETE from a silence timeout without metrics; leave
+        # that to the user-turn controller's normal timeout fallback.
+        if state is EndOfTurnState.COMPLETE and result is not None:
+            is_complete = getattr(result, "is_complete", True)
+            if is_complete:
+                await self.trigger_user_turn_stopped()
+
+
 class UserAudioContextCollector(FrameProcessor):
     """Collect one user audio turn and append it to the shared LLM context."""
 
@@ -267,31 +318,6 @@ class UserAudioContextCollector(FrameProcessor):
             await self._user_aggregator.push_context_frame()
 
 
-class TextInputContextCollector(FrameProcessor):
-    """Append RTVI typed text messages to the shared LLM context."""
-
-    def __init__(self, *, context: LLMContext):
-        super().__init__()
-        self._context = context
-
-    async def process_frame(self, frame: Frame, direction: FrameDirection):
-        await super().process_frame(frame, direction)
-
-        if not isinstance(frame, LLMMessagesAppendFrame):
-            await self.push_frame(frame, direction)
-            return
-
-        self._context.add_messages(frame.messages)
-        roles = ", ".join(str(message.get("role", "unknown")) for message in frame.messages)
-        logger.debug(
-            "Added typed RTVI message(s) to LLM context "
-            f"({len(frame.messages)} messages, roles: {roles}, "
-            f"run_llm={frame.run_llm}, {len(self._context.get_messages())} total messages)"
-        )
-        if frame.run_llm:
-            await self.push_frame(LLMContextFrame(context=self._context), direction)
-
-
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     _ensure_file_logging()
     logger.info("Starting Nemotron Omni audio bot")
@@ -331,7 +357,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     )
 
     tts = _build_tts()
-    stt = _build_nemotron_speech_stt(audio_passthrough=True)
+    stt = _build_nemotron_speech_stt(audio_passthrough=False)
 
     context = LLMContext()
     user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
@@ -340,7 +366,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             vad_analyzer=SileroVADAnalyzer(),
             user_turn_strategies=UserTurnStrategies(
                 stop=[
-                    TurnAnalyzerUserTurnStopStrategy(
+                    AudioOnlySmartTurnStopStrategy(
                         turn_analyzer=LocalSmartTurnAnalyzerV3()
                     )
                 ]
@@ -354,18 +380,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             "NEMOTRON_OMNI_AUDIO_CONTEXT_TEXT",
             "User audio follows. Listen to it and respond to the user's latest request.",
         ),
-        push_context_on_finish=False,
+        push_context_on_finish=True,
     )
-    text_input_collector = TextInputContextCollector(context=context)
-
     pipeline = Pipeline(
         [
             transport.input(),
-            stt,
-            text_input_collector,
+            user_aggregator,
             ParallelPipeline(
                 [
-                    user_aggregator,
                     audio_collector,
                     llm,
                     tts,
@@ -373,7 +395,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                     assistant_aggregator,
                 ],
                 [
-                    FrameFilter((InterimTranscriptionFrame, TranscriptionFrame)),
+                    stt,
                 ],
             ),
         ]

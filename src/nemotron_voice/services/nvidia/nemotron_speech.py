@@ -35,9 +35,11 @@ from pipecat.frames.frames import (
     InterimTranscriptionFrame,
     StartFrame,
     TranscriptionFrame,
+    UserStoppedSpeakingFrame,
     VADUserStoppedSpeakingFrame,
 )
 from pipecat.processors.frame_processor import FrameDirection
+from pipecat.services.settings import STTSettings
 from pipecat.services.stt_latency import DEFAULT_TTFS_P99
 from pipecat.services.stt_service import WebsocketSTTService
 from pipecat.transcriptions.language import Language
@@ -62,7 +64,8 @@ class NemotronSpeechWebSocketSTTService(WebsocketSTTService):
         sample_rate: int | None = 16000,
         language: Language | None = Language.EN_US,
         audio_passthrough: bool = False,
-        finalize_on_vad: bool = True,
+        finalize_on_vad: bool = False,
+        finalize_on_user_stop: bool = True,
         ready_timeout_secs: float = 10.0,
         ttfs_p99_latency: float | None = DEFAULT_TTFS_P99,
         **kwargs,
@@ -75,19 +78,23 @@ class NemotronSpeechWebSocketSTTService(WebsocketSTTService):
             language: Language attached to transcription frames.
             audio_passthrough: Whether audio frames should continue downstream after STT.
             finalize_on_vad: Whether VAD stop should send a hard reset/finalize command.
+            finalize_on_user_stop: Whether completed user turns should finalize ASR.
             ready_timeout_secs: Seconds to wait for the server ready message.
             ttfs_p99_latency: Metadata for downstream turn processors.
             **kwargs: Additional arguments passed to ``WebsocketSTTService``.
         """
+        settings = kwargs.pop("settings", STTSettings(model=None, language=language))
         super().__init__(
             sample_rate=sample_rate,
             audio_passthrough=audio_passthrough,
             ttfs_p99_latency=ttfs_p99_latency,
+            settings=settings,
             **kwargs,
         )
         self._url = url
         self._language = language
         self._finalize_on_vad = finalize_on_vad
+        self._finalize_on_user_stop = finalize_on_user_stop
         self._ready_timeout_secs = ready_timeout_secs
         self._receive_task: asyncio.Task | None = None
         self._ready = False
@@ -128,6 +135,8 @@ class NemotronSpeechWebSocketSTTService(WebsocketSTTService):
         await super().process_frame(frame, direction)
 
         if isinstance(frame, VADUserStoppedSpeakingFrame) and self._finalize_on_vad:
+            await self._send_reset(finalize=True)
+        elif isinstance(frame, UserStoppedSpeakingFrame) and self._finalize_on_user_stop:
             await self._send_reset(finalize=True)
 
     async def _connect(self):
