@@ -1,42 +1,3 @@
-From 5ebe459d8e7ec25b017d24ddb2d777e96a190a3b Mon Sep 17 00:00:00 2001
-From: Kwindla Hultman Kramer <kwindla@gmail.com>
-Date: Thu, 30 Apr 2026 16:24:41 -0700
-Subject: [PATCH] Add Nemotron Omni conversation cache
-
-Add OpenAI chat conversation_id support with a frontend ledger, suffix-only reconstruction, exact KV/Mamba cache attach and publish lifecycle, conversation-cache metrics, and coverage for text/audio suffix-only reuse.
----
- .../chat_completion/test_serving_chat.py      |  51 ++
- .../openai/test_conversation_cache.py         | 666 ++++++++++++++++++
- vllm/engine/protocol.py                       |  39 +
- .../openai/chat_completion/api_router.py      |  11 +
- .../openai/chat_completion/protocol.py        |  24 +-
- .../openai/chat_completion/serving.py         | 650 ++++++++++++++---
- vllm/entrypoints/openai/conversation_cache.py | 160 +++++
- vllm/entrypoints/serve/render/serving.py      |  10 +-
- vllm/inputs/engine.py                         |  16 +
- vllm/inputs/llm.py                            |   5 +
- vllm/inputs/preprocess.py                     |   4 +
- vllm/renderers/base.py                        |   5 +
- vllm/v1/core/conversation_cache.py            | 350 +++++++++
- vllm/v1/core/kv_cache_manager.py              | 258 ++++++-
- vllm/v1/core/sched/output.py                  |  15 +
- vllm/v1/core/sched/scheduler.py               | 246 ++++++-
- vllm/v1/core/single_type_kv_cache_manager.py  | 164 +++++
- vllm/v1/engine/__init__.py                    |   3 +
- vllm/v1/engine/async_llm.py                   |  39 +
- vllm/v1/engine/core.py                        |  37 +
- vllm/v1/engine/core_client.py                 | 224 ++++++
- vllm/v1/engine/input_processor.py             |  20 +
- vllm/v1/metrics/loggers.py                    |  37 +
- vllm/v1/metrics/stats.py                      |  20 +
- vllm/v1/request.py                            |  14 +
- vllm/v1/worker/gpu_model_runner.py            |  94 +++
- vllm/v1/worker/mamba_utils.py                 |  95 +++
- 27 files changed, 3156 insertions(+), 101 deletions(-)
- create mode 100644 tests/entrypoints/openai/test_conversation_cache.py
- create mode 100644 vllm/entrypoints/openai/conversation_cache.py
- create mode 100644 vllm/v1/core/conversation_cache.py
-
 diff --git a/tests/entrypoints/openai/chat_completion/test_serving_chat.py b/tests/entrypoints/openai/chat_completion/test_serving_chat.py
 index 39d59d2..d28cb51 100644
 --- a/tests/entrypoints/openai/chat_completion/test_serving_chat.py
@@ -907,7 +868,7 @@ index aacac38..07b7ba4 100644
      @classmethod
      def check_system_message_content_type(cls, data):
 diff --git a/vllm/entrypoints/openai/chat_completion/serving.py b/vllm/entrypoints/openai/chat_completion/serving.py
-index 12dc2cd..e25eda6 100644
+index 12dc2cd..c9d5287 100644
 --- a/vllm/entrypoints/openai/chat_completion/serving.py
 +++ b/vllm/entrypoints/openai/chat_completion/serving.py
 @@ -2,12 +2,13 @@
@@ -1248,7 +1209,7 @@ index 12dc2cd..e25eda6 100644
                  result_generator,
                  request_id,
                  model_name,
-@@ -364,19 +455,394 @@ class OpenAIServingChat(OpenAIServing):
+@@ -364,19 +455,486 @@ class OpenAIServingChat(OpenAIServing):
                  tokenizer,
                  request_metadata,
                  reasoning_parser,
@@ -1535,11 +1496,17 @@ index 12dc2cd..e25eda6 100644
 +        prompt_token_ids: tuple[int, ...] | None,
 +    ) -> None:
 +        assistant_text = ""
++        assistant_tool_calls = None
 +        if response.choices:
-+            assistant_text = response.choices[0].message.content or ""
++            message = response.choices[0].message
++            assistant_text = message.content or ""
++            assistant_tool_calls = self._jsonable_tool_calls(
++                getattr(message, "tool_calls", None)
++            )
 +        await self._publish_conversation_response(
 +            lease,
 +            assistant_text,
++            assistant_tool_calls=assistant_tool_calls,
 +            suffix_messages=suffix_messages,
 +            prompt_token_ids=prompt_token_ids,
 +        )
@@ -1549,6 +1516,7 @@ index 12dc2cd..e25eda6 100644
 +        lease: ConversationFrontendLease,
 +        assistant_text: str,
 +        *,
++        assistant_tool_calls: list[Any] | None = None,
 +        suffix_messages: list[Any],
 +        prompt_token_ids: tuple[int, ...] | None,
 +    ) -> None:
@@ -1565,10 +1533,18 @@ index 12dc2cd..e25eda6 100644
 +            )
 +            await self.conversation_cache.discard(lease)
 +            return
++        assistant_message: dict[str, Any] = {
++            "role": "assistant",
++            "content": assistant_text,
++        }
++        if assistant_tool_calls:
++            assistant_message["tool_calls"] = copy.deepcopy(assistant_tool_calls)
++            if not assistant_text:
++                assistant_message["content"] = None
 +        committed_messages = [
 +            *copy.deepcopy(list(lease.committed_messages)),
 +            *copy.deepcopy(suffix_messages),
-+            {"role": "assistant", "content": assistant_text},
++            assistant_message,
 +        ]
 +        await self.conversation_cache.publish(
 +            lease,
@@ -1599,14 +1575,21 @@ index 12dc2cd..e25eda6 100644
 +        prompt_token_ids: tuple[int, ...] | None,
 +    ) -> AsyncGenerator[str, None]:
 +        assistant_text_parts: list[str] = []
++        assistant_tool_calls_by_index: dict[int, dict[str, Any]] = {}
 +        saw_done = False
 +        saw_error = False
 +
 +        try:
 +            async for chunk in stream_generator:
-+                text_delta, done, error = self._collect_conversation_stream_delta(chunk)
++                text_delta, tool_call_deltas, done, error = (
++                    self._collect_conversation_stream_delta(chunk)
++                )
 +                if text_delta:
 +                    assistant_text_parts.append(text_delta)
++                for tool_call_delta in tool_call_deltas:
++                    self._merge_conversation_stream_tool_call_delta(
++                        assistant_tool_calls_by_index, tool_call_delta
++                    )
 +                saw_done = saw_done or done
 +                saw_error = saw_error or error
 +                yield chunk
@@ -1615,6 +1598,11 @@ index 12dc2cd..e25eda6 100644
 +                await self._publish_conversation_response(
 +                    lease,
 +                    "".join(assistant_text_parts),
++                    assistant_tool_calls=(
++                        self._finalize_conversation_stream_tool_calls(
++                            assistant_tool_calls_by_index
++                        )
++                    ),
 +                    suffix_messages=suffix_messages,
 +                    prompt_token_ids=prompt_token_ids,
 +                )
@@ -1625,8 +1613,11 @@ index 12dc2cd..e25eda6 100644
 +            raise
 +
 +    @staticmethod
-+    def _collect_conversation_stream_delta(chunk: str) -> tuple[str, bool, bool]:
++    def _collect_conversation_stream_delta(
++        chunk: str,
++    ) -> tuple[str, list[dict[str, Any]], bool, bool]:
 +        text_parts: list[str] = []
++        tool_call_deltas: list[dict[str, Any]] = []
 +        saw_done = False
 +        saw_error = False
 +        for line in chunk.splitlines():
@@ -1648,7 +1639,69 @@ index 12dc2cd..e25eda6 100644
 +                content = delta.get("content")
 +                if content:
 +                    text_parts.append(content)
-+        return "".join(text_parts), saw_done, saw_error
++                tool_call_deltas.extend(delta.get("tool_calls") or [])
++        return "".join(text_parts), tool_call_deltas, saw_done, saw_error
++
++    @staticmethod
++    def _merge_conversation_stream_tool_call_delta(
++        tool_calls_by_index: dict[int, dict[str, Any]],
++        tool_call_delta: dict[str, Any],
++    ) -> None:
++        index = tool_call_delta.get("index")
++        if index is None:
++            index = len(tool_calls_by_index)
++        entry = tool_calls_by_index.setdefault(
++            index,
++            {
++                "id": None,
++                "type": "function",
++                "function": {"name": "", "arguments": ""},
++            },
++        )
++        if tool_call_delta.get("id"):
++            entry["id"] = tool_call_delta["id"]
++        if tool_call_delta.get("type"):
++            entry["type"] = tool_call_delta["type"]
++
++        function_delta = tool_call_delta.get("function") or {}
++        function = entry.setdefault("function", {"name": "", "arguments": ""})
++        if function_delta.get("name"):
++            function["name"] = (
++                f"{function.get('name') or ''}{function_delta['name']}"
++            )
++        if function_delta.get("arguments"):
++            function["arguments"] = (
++                f"{function.get('arguments') or ''}{function_delta['arguments']}"
++            )
++
++    @staticmethod
++    def _finalize_conversation_stream_tool_calls(
++        tool_calls_by_index: dict[int, dict[str, Any]],
++    ) -> list[dict[str, Any]] | None:
++        if not tool_calls_by_index:
++            return None
++        tool_calls: list[dict[str, Any]] = []
++        for index in sorted(tool_calls_by_index):
++            tool_call = copy.deepcopy(tool_calls_by_index[index])
++            tool_call["id"] = tool_call.get("id") or f"call_{index}"
++            tool_call["type"] = tool_call.get("type") or "function"
++            function = tool_call.setdefault("function", {})
++            function["name"] = function.get("name") or ""
++            function["arguments"] = function.get("arguments") or "{}"
++            tool_calls.append(tool_call)
++        return tool_calls
++
++    @staticmethod
++    def _jsonable_tool_calls(tool_calls: Any) -> list[Any] | None:
++        if not tool_calls:
++            return None
++        jsonable: list[Any] = []
++        for tool_call in tool_calls:
++            if hasattr(tool_call, "model_dump"):
++                jsonable.append(tool_call.model_dump(exclude_none=True))
++            else:
++                jsonable.append(copy.deepcopy(tool_call))
++        return jsonable
  
      def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
          if request.add_generation_prompt:
@@ -4000,6 +4053,3 @@ index c832389..4f236cd 100644
  def preprocess_mamba(
      scheduler_output: SchedulerOutput,
      kv_cache_config: KVCacheConfig,
--- 
-2.48.1
-

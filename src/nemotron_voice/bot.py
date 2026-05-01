@@ -279,6 +279,12 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         suffix_only_conversation=(
             os.getenv("NEMOTRON_OMNI_SUFFIX_ONLY_CONVERSATION", "1") != "0"
         ),
+        enable_bash_tool=os.getenv("NEMOTRON_OMNI_ENABLE_BASH_TOOL", "1") != "0",
+        bash_tool_cwd=os.getenv("NEMOTRON_OMNI_BASH_TOOL_CWD", str(Path.cwd())),
+        bash_tool_timeout_secs=float(os.getenv("NEMOTRON_OMNI_BASH_TOOL_TIMEOUT_SECS", "20")),
+        bash_tool_max_output_chars=int(
+            os.getenv("NEMOTRON_OMNI_BASH_TOOL_MAX_OUTPUT_CHARS", "12000")
+        ),
         settings=NemotronOmniAudioLLMService.Settings(
             system_instruction=os.getenv(
                 _SYSTEM_INSTRUCTION_ENV, DEFAULT_VOICE_SYSTEM_INSTRUCTION

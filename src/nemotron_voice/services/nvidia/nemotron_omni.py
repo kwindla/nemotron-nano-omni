@@ -18,7 +18,9 @@ import base64
 import copy
 import io
 import json
+import os
 import time
+import uuid
 import wave
 from dataclasses import dataclass, field
 from typing import Any
@@ -56,6 +58,40 @@ DEFAULT_VOICE_SYSTEM_INSTRUCTION = (
     "emoticons, decorative symbols, or special formatting. Avoid long lists. Do not "
     "mention these formatting rules unless asked."
 )
+
+BASH_TOOL_NAME = "run_bash"
+BASH_TOOL_DEFINITION: dict[str, Any] = {
+    "type": "function",
+    "function": {
+        "name": BASH_TOOL_NAME,
+        "description": (
+            "Execute arbitrary bash code in the local project workspace and return "
+            "stdout, stderr, and the exit code. Use this when the user asks you to "
+            "inspect or operate on the local machine. Examples: use "
+            "`git branch --show-current` to see the current git branch; use "
+            "`find . -maxdepth 1 -type f | wc -l` to count files in this directory; "
+            "use `find . -type f | wc -l` to count files total in this project."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "Bash code to run with `bash -lc`.",
+                }
+            },
+            "required": ["code"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+@dataclass
+class ChatCompletionPassResult:
+    output_text: str
+    tool_calls: list[dict[str, Any]]
+    first_token: bool
 
 
 @dataclass
@@ -108,6 +144,11 @@ class NemotronOmniAudioLLMService(LLMService):
         vad_start_secs: float = 0.08,
         vad_stop_secs: float = 0.45,
         request_timeout_secs: float = 180.0,
+        enable_bash_tool: bool = False,
+        bash_tool_cwd: str | None = None,
+        bash_tool_timeout_secs: float = 20.0,
+        bash_tool_max_output_chars: int = 12000,
+        bash_tool_max_rounds: int = 3,
         **kwargs,
     ):
         """Initialize the service.
@@ -133,6 +174,11 @@ class NemotronOmniAudioLLMService(LLMService):
             vad_start_secs: Speech duration required to start an internal turn.
             vad_stop_secs: Silence duration required to stop an internal turn.
             request_timeout_secs: Total HTTP timeout for one streamed request.
+            enable_bash_tool: Whether to expose the local ``run_bash`` tool.
+            bash_tool_cwd: Working directory for bash tool calls.
+            bash_tool_timeout_secs: Maximum runtime for one bash tool call.
+            bash_tool_max_output_chars: Maximum stdout or stderr characters returned.
+            bash_tool_max_rounds: Maximum tool-call iterations for one model response.
             **kwargs: Additional arguments for ``LLMService``.
         """
         default_settings = self.Settings(
@@ -175,6 +221,11 @@ class NemotronOmniAudioLLMService(LLMService):
         self._vad_start_secs = vad_start_secs
         self._vad_stop_secs = vad_stop_secs
         self._request_timeout_secs = request_timeout_secs
+        self._enable_bash_tool = enable_bash_tool
+        self._bash_tool_cwd = bash_tool_cwd or os.getcwd()
+        self._bash_tool_timeout_secs = bash_tool_timeout_secs
+        self._bash_tool_max_output_chars = bash_tool_max_output_chars
+        self._bash_tool_max_rounds = bash_tool_max_rounds
 
         self._session: aiohttp.ClientSession | None = None
         self._generation_task: asyncio.Task | None = None
@@ -433,6 +484,9 @@ class NemotronOmniAudioLLMService(LLMService):
             "stream": True,
             "stream_options": {"include_usage": True},
         }
+        if self._enable_bash_tool:
+            payload["tools"] = [BASH_TOOL_DEFINITION]
+            payload["tool_choice"] = "auto"
 
         if self._settings.max_tokens is not None:
             payload["max_tokens"] = self._settings.max_tokens
@@ -624,7 +678,9 @@ class NemotronOmniAudioLLMService(LLMService):
     ):
         started_at = time.perf_counter()
         first_token = True
-        output_text = ""
+        output_text_parts: list[str] = []
+        tool_rounds = 0
+        used_tools = False
         completed = False
 
         try:
@@ -648,51 +704,52 @@ class NemotronOmniAudioLLMService(LLMService):
             )
             logger.debug(f"{self}: sending {request_description}{cache_info}")
 
-            async with self._session.post(
-                self._chat_completions_url,
-                json=payload,
-                headers=headers,
-            ) as response:
-                if response.status != 200:
-                    error_text = await response.text()
-                    raise RuntimeError(f"vLLM request failed with {response.status}: {error_text}")
+            current_payload = copy.deepcopy(payload)
+            while True:
+                result = await self._stream_completion_pass(
+                    current_payload,
+                    headers=headers,
+                    first_token=first_token,
+                )
+                first_token = result.first_token
+                if result.output_text:
+                    output_text_parts.append(result.output_text)
+                if self._conversation_id:
+                    self._conversation_cache_committed = True
 
-                async for event in self._iter_sse_events(response):
-                    if event == "[DONE]":
-                        break
-                    try:
-                        chunk = json.loads(event)
-                    except json.JSONDecodeError:
-                        logger.debug(f"{self}: skipping malformed SSE event: {event!r}")
-                        continue
+                if not result.tool_calls:
+                    break
+                if not self._enable_bash_tool:
+                    logger.warning(
+                        f"{self}: model requested tool calls but bash tool is disabled"
+                    )
+                    break
+                if tool_rounds >= self._bash_tool_max_rounds:
+                    logger.warning(
+                        f"{self}: reached bash tool round limit "
+                        f"({self._bash_tool_max_rounds})"
+                    )
+                    break
 
-                    usage = chunk.get("usage")
-                    if usage:
-                        await self.start_llm_usage_metrics(
-                            LLMTokenUsage(
-                                prompt_tokens=usage.get("prompt_tokens", 0),
-                                completion_tokens=usage.get("completion_tokens", 0),
-                                total_tokens=usage.get("total_tokens", 0),
-                            )
-                        )
-
-                    for choice in chunk.get("choices") or []:
-                        delta = choice.get("delta") or {}
-                        text = delta.get("content") or ""
-                        if not text:
-                            continue
-                        if first_token:
-                            first_token = False
-                            await self.stop_ttfb_metrics()
-                        output_text += text
-                        await self._push_llm_text(text)
+                tool_rounds += 1
+                used_tools = True
+                logger.debug(
+                    f"{self}: executing {len(result.tool_calls)} tool call(s) "
+                    f"for round {tool_rounds}"
+                )
+                tool_messages = await self._execute_tool_calls(result.tool_calls)
+                current_payload = self._payload_after_tool_calls(
+                    current_payload,
+                    result.tool_calls,
+                    tool_messages,
+                )
 
             completed = True
-            if self._conversation_id:
-                self._conversation_cache_committed = True
+            if used_tools:
+                self._rotate_conversation_id_after_tool_use()
             logger.debug(
                 f"{self}: completed response in {time.perf_counter() - started_at:.3f}s: "
-                f"{output_text!r}"
+                f"{''.join(output_text_parts)!r}"
             )
         except asyncio.CancelledError:
             logger.debug(f"{self}: audio completion cancelled")
@@ -707,6 +764,244 @@ class NemotronOmniAudioLLMService(LLMService):
             await self.push_frame(LLMFullResponseEndFrame())
             if self._generation_task is asyncio.current_task():
                 self._generation_task = None
+
+    async def _stream_completion_pass(
+        self,
+        payload: dict[str, Any],
+        *,
+        headers: dict[str, str],
+        first_token: bool,
+    ) -> ChatCompletionPassResult:
+        output_text = ""
+        tool_calls_by_index: dict[int, dict[str, Any]] = {}
+
+        async with self._session.post(
+            self._chat_completions_url,
+            json=payload,
+            headers=headers,
+        ) as response:
+            if response.status != 200:
+                error_text = await response.text()
+                raise RuntimeError(f"vLLM request failed with {response.status}: {error_text}")
+
+            async for event in self._iter_sse_events(response):
+                if event == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(event)
+                except json.JSONDecodeError:
+                    logger.debug(f"{self}: skipping malformed SSE event: {event!r}")
+                    continue
+
+                usage = chunk.get("usage")
+                if usage:
+                    await self.start_llm_usage_metrics(
+                        LLMTokenUsage(
+                            prompt_tokens=usage.get("prompt_tokens", 0),
+                            completion_tokens=usage.get("completion_tokens", 0),
+                            total_tokens=usage.get("total_tokens", 0),
+                        )
+                    )
+
+                for choice in chunk.get("choices") or []:
+                    delta = choice.get("delta") or {}
+                    for tool_call_delta in delta.get("tool_calls") or []:
+                        self._merge_tool_call_delta(tool_calls_by_index, tool_call_delta)
+
+                    text = delta.get("content") or ""
+                    if not text:
+                        continue
+                    if first_token:
+                        first_token = False
+                        await self.stop_ttfb_metrics()
+                    output_text += text
+                    await self._push_llm_text(text)
+
+        return ChatCompletionPassResult(
+            output_text=output_text,
+            tool_calls=self._finalize_tool_calls(tool_calls_by_index),
+            first_token=first_token,
+        )
+
+    @staticmethod
+    def _merge_tool_call_delta(
+        tool_calls_by_index: dict[int, dict[str, Any]],
+        tool_call_delta: dict[str, Any],
+    ) -> None:
+        index = tool_call_delta.get("index")
+        if index is None:
+            index = len(tool_calls_by_index)
+
+        entry = tool_calls_by_index.setdefault(
+            index,
+            {
+                "id": None,
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+        if tool_call_delta.get("id"):
+            entry["id"] = tool_call_delta["id"]
+        if tool_call_delta.get("type"):
+            entry["type"] = tool_call_delta["type"]
+
+        function_delta = tool_call_delta.get("function") or {}
+        function = entry.setdefault("function", {"name": "", "arguments": ""})
+        if function_delta.get("name"):
+            function["name"] = f"{function.get('name') or ''}{function_delta['name']}"
+        if function_delta.get("arguments"):
+            function["arguments"] = (
+                f"{function.get('arguments') or ''}{function_delta['arguments']}"
+            )
+
+    @staticmethod
+    def _finalize_tool_calls(
+        tool_calls_by_index: dict[int, dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        tool_calls: list[dict[str, Any]] = []
+        for index in sorted(tool_calls_by_index):
+            tool_call = copy.deepcopy(tool_calls_by_index[index])
+            tool_call["id"] = tool_call.get("id") or f"call_{index}"
+            tool_call["type"] = tool_call.get("type") or "function"
+            function = tool_call.setdefault("function", {})
+            function["name"] = function.get("name") or ""
+            function["arguments"] = function.get("arguments") or "{}"
+            tool_calls.append(tool_call)
+        return tool_calls
+
+    def _payload_after_tool_calls(
+        self,
+        payload: dict[str, Any],
+        tool_calls: list[dict[str, Any]],
+        tool_messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        next_payload = copy.deepcopy(payload)
+        next_payload["messages"] = [
+            *copy.deepcopy(payload["messages"]),
+            self._assistant_tool_call_message(tool_calls),
+            *tool_messages,
+        ]
+        next_payload.pop("tools", None)
+        next_payload.pop("tool_choice", None)
+        return next_payload
+
+    def _rotate_conversation_id_after_tool_use(self) -> None:
+        if not self._conversation_id:
+            return
+        old_conversation_id = self._conversation_id
+        self._conversation_id = f"{old_conversation_id}-tool-{uuid.uuid4().hex[:8]}"
+        self._conversation_cache_committed = False
+        logger.debug(
+            f"{self}: rotated conversation_id after tool use: "
+            f"{old_conversation_id} -> {self._conversation_id}"
+        )
+
+    @staticmethod
+    def _assistant_tool_call_message(
+        tool_calls: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        return {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": copy.deepcopy(tool_calls),
+        }
+
+    async def _execute_tool_calls(
+        self,
+        tool_calls: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        tool_messages: list[dict[str, Any]] = []
+        for tool_call in tool_calls:
+            result = await self._execute_tool_call(tool_call)
+            tool_messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.get("id") or "call_0",
+                    "content": result,
+                }
+            )
+        return tool_messages
+
+    async def _execute_tool_call(self, tool_call: dict[str, Any]) -> str:
+        function = tool_call.get("function") or {}
+        name = function.get("name") or ""
+        if name != BASH_TOOL_NAME:
+            return self._tool_result_json(
+                ok=False,
+                error=f"Unsupported tool: {name!r}",
+            )
+
+        arguments_text = function.get("arguments") or "{}"
+        try:
+            arguments = json.loads(arguments_text)
+        except json.JSONDecodeError as exc:
+            return self._tool_result_json(
+                ok=False,
+                error=f"Invalid JSON arguments: {exc}",
+                raw_arguments=arguments_text,
+            )
+
+        code = arguments.get("code")
+        if not isinstance(code, str) or not code.strip():
+            return self._tool_result_json(
+                ok=False,
+                error="Missing required string argument: code",
+                raw_arguments=arguments_text,
+            )
+        return await self._run_bash_tool(code)
+
+    async def _run_bash_tool(self, code: str) -> str:
+        started_at = time.perf_counter()
+        logger.debug(
+            f"{self}: running bash tool in {self._bash_tool_cwd!r}: {code!r}"
+        )
+        try:
+            process = await asyncio.create_subprocess_exec(
+                "bash",
+                "-lc",
+                code,
+                cwd=self._bash_tool_cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+        except Exception as exc:
+            return self._tool_result_json(ok=False, error=f"Failed to start bash: {exc}")
+
+        timed_out = False
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self._bash_tool_timeout_secs,
+            )
+        except asyncio.TimeoutError:
+            timed_out = True
+            process.kill()
+            stdout, stderr = await process.communicate()
+
+        stdout_text = stdout.decode("utf-8", errors="replace")
+        stderr_text = stderr.decode("utf-8", errors="replace")
+        return self._tool_result_json(
+            ok=(process.returncode == 0 and not timed_out),
+            exit_code=process.returncode,
+            stdout=self._truncate_tool_output(stdout_text),
+            stderr=self._truncate_tool_output(stderr_text),
+            timed_out=timed_out,
+            elapsed_secs=round(time.perf_counter() - started_at, 3),
+            cwd=self._bash_tool_cwd,
+        )
+
+    def _truncate_tool_output(self, text: str) -> str:
+        if len(text) <= self._bash_tool_max_output_chars:
+            return text
+        omitted = len(text) - self._bash_tool_max_output_chars
+        return (
+            text[: self._bash_tool_max_output_chars]
+            + f"\n...[truncated {omitted} chars]"
+        )
+
+    @staticmethod
+    def _tool_result_json(**payload: Any) -> str:
+        return json.dumps(payload, ensure_ascii=True)
 
     async def _iter_sse_events(self, response: aiohttp.ClientResponse):
         buffer = ""
