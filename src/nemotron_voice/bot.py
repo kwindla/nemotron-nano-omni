@@ -23,8 +23,10 @@ from pipecat.frames.frames import (
     Frame,
     InputAudioRawFrame,
     InterimTranscriptionFrame,
+    LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
+    LLMMessagesAppendFrame,
     LLMTextFrame,
     MetricsFrame,
     TranscriptionFrame,
@@ -265,6 +267,31 @@ class UserAudioContextCollector(FrameProcessor):
             await self._user_aggregator.push_context_frame()
 
 
+class TextInputContextCollector(FrameProcessor):
+    """Append RTVI typed text messages to the shared LLM context."""
+
+    def __init__(self, *, context: LLMContext):
+        super().__init__()
+        self._context = context
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        await super().process_frame(frame, direction)
+
+        if not isinstance(frame, LLMMessagesAppendFrame):
+            await self.push_frame(frame, direction)
+            return
+
+        self._context.add_messages(frame.messages)
+        roles = ", ".join(str(message.get("role", "unknown")) for message in frame.messages)
+        logger.debug(
+            "Added typed RTVI message(s) to LLM context "
+            f"({len(frame.messages)} messages, roles: {roles}, "
+            f"run_llm={frame.run_llm}, {len(self._context.get_messages())} total messages)"
+        )
+        if frame.run_llm:
+            await self.push_frame(LLMContextFrame(context=self._context), direction)
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     _ensure_file_logging()
     logger.info("Starting Nemotron Omni audio bot")
@@ -272,6 +299,11 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         f"pipecat-{uuid.uuid4().hex}"
     )
     logger.info(f"Using Nemotron Omni conversation_id={conversation_id}")
+
+    rtvi = RTVIProcessor()
+
+    async def send_bash_tool_event(payload: dict):
+        await rtvi.send_server_message(payload)
 
     llm = NemotronOmniAudioLLMService(
         base_url=os.getenv("NEMOTRON_OMNI_BASE_URL", "http://127.0.0.1:8000/v1"),
@@ -285,6 +317,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         bash_tool_max_output_chars=int(
             os.getenv("NEMOTRON_OMNI_BASH_TOOL_MAX_OUTPUT_CHARS", "12000")
         ),
+        bash_tool_event_sender=send_bash_tool_event,
         settings=NemotronOmniAudioLLMService.Settings(
             system_instruction=os.getenv(
                 _SYSTEM_INSTRUCTION_ENV, DEFAULT_VOICE_SYSTEM_INSTRUCTION
@@ -323,11 +356,13 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
         push_context_on_finish=False,
     )
+    text_input_collector = TextInputContextCollector(context=context)
 
     pipeline = Pipeline(
         [
             transport.input(),
             stt,
+            text_input_collector,
             ParallelPipeline(
                 [
                     user_aggregator,
@@ -344,7 +379,6 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ]
     )
 
-    rtvi = RTVIProcessor()
     task = PipelineTask(
         pipeline,
         params=PipelineParams(
@@ -359,6 +393,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
                     LLMFullResponseStartFrame: None,
                     LLMFullResponseEndFrame: None,
                     LLMTextFrame: None,
+                    LLMMessagesAppendFrame: None,
                     TranscriptionFrame: None,
                     InterimTranscriptionFrame: None,
                     TTSTextFrame: None,

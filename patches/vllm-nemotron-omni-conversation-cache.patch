@@ -819,10 +819,10 @@ index cdaaa27..56d4256 100644
      return StreamingResponse(content=generator, media_type="text/event-stream")
  
 diff --git a/vllm/entrypoints/openai/chat_completion/protocol.py b/vllm/entrypoints/openai/chat_completion/protocol.py
-index aacac38..07b7ba4 100644
+index aacac38..a091139 100644
 --- a/vllm/entrypoints/openai/chat_completion/protocol.py
 +++ b/vllm/entrypoints/openai/chat_completion/protocol.py
-@@ -332,6 +332,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
+@@ -332,6 +332,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
          ),
      )
  
@@ -833,11 +833,19 @@ index aacac38..07b7ba4 100644
 +            "turn-boundary state may be reused by a vLLM conversation cache."
 +        ),
 +    )
++    conversation_require_cache: bool = Field(
++        default=False,
++        description=(
++            "If true, the request messages are a suffix-only append and vLLM "
++            "must reject the request with ConversationCacheMissError when the "
++            "conversation_id is not present in the frontend conversation cache."
++        ),
++    )
 +
      kv_transfer_params: dict[str, Any] | None = Field(
          default=None,
          description="KVTransfer parameters used for disaggregated serving.",
-@@ -530,7 +538,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
+@@ -530,7 +546,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                      else replace(self.structured_outputs, **structured_outputs_kwargs)
                  )
  
@@ -848,7 +856,7 @@ index aacac38..07b7ba4 100644
          if self.kv_transfer_params:
              # Pass in kv_transfer_params via extra_args
              extra_args["kv_transfer_params"] = self.kv_transfer_params
-@@ -776,6 +786,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
+@@ -776,6 +794,22 @@ class ChatCompletionRequest(OpenAIBaseModel):
              )
          return data
  
@@ -862,21 +870,26 @@ index aacac38..07b7ba4 100644
 +            raise ValueError(
 +                "Parameter 'conversation_id' must be a non-empty string if provided."
 +            )
++        if data.get("conversation_require_cache") and not data.get("conversation_id"):
++            raise ValueError(
++                "Parameter 'conversation_require_cache' requires 'conversation_id'."
++            )
 +        return data
 +
      @model_validator(mode="before")
      @classmethod
      def check_system_message_content_type(cls, data):
 diff --git a/vllm/entrypoints/openai/chat_completion/serving.py b/vllm/entrypoints/openai/chat_completion/serving.py
-index 12dc2cd..c9d5287 100644
+index 12dc2cd..aedabb5 100644
 --- a/vllm/entrypoints/openai/chat_completion/serving.py
 +++ b/vllm/entrypoints/openai/chat_completion/serving.py
-@@ -2,12 +2,13 @@
+@@ -2,12 +2,14 @@
  # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  
  import asyncio
 +import copy
  import json
++import os
  import time
  from collections.abc import AsyncGenerator, AsyncIterator
  from collections.abc import Sequence as GenericSequence
@@ -886,11 +899,12 @@ index 12dc2cd..c9d5287 100644
  
  import partial_json_parser
  import regex as re
-@@ -39,6 +40,11 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
+@@ -39,6 +41,12 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
      TokenState,
      extract_harmony_streaming_delta,
  )
 +from vllm.entrypoints.openai.conversation_cache import (
++    ConversationCacheKey,
 +    ConversationFrontendCache,
 +    ConversationFrontendLease,
 +    ConversationStreamingResult,
@@ -898,7 +912,7 @@ index 12dc2cd..c9d5287 100644
  from vllm.entrypoints.openai.engine.protocol import (
      DeltaFunctionCall,
      DeltaMessage,
-@@ -63,7 +69,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
+@@ -63,7 +71,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
  )
  from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
  from vllm.entrypoints.utils import get_max_tokens, should_include_usage
@@ -907,15 +921,63 @@ index 12dc2cd..c9d5287 100644
  from vllm.logger import init_logger
  from vllm.logprobs import Logprob
  from vllm.outputs import CompletionOutput, RequestOutput
-@@ -177,6 +183,7 @@ class OpenAIServingChat(OpenAIServing):
+@@ -177,6 +185,55 @@ class OpenAIServingChat(OpenAIServing):
          # Please use the Responses API instead.
          self.supports_code_interpreter = False
          self.python_tool = None
 +        self.conversation_cache = ConversationFrontendCache()
++        self.conversation_cache_max_entries = self._conversation_cache_positive_int(
++            "VLLM_CONVERSATION_CACHE_MAX_ENTRIES",
++            8,
++        )
++        self.conversation_cache_max_tokens = self._conversation_cache_positive_int(
++            "VLLM_CONVERSATION_CACHE_MAX_TOKENS",
++            max(self.model_config.max_model_len * 4, self.model_config.max_model_len),
++        )
++        self.conversation_cache_filter_prefix_mm_inputs = (
++            self._conversation_cache_non_negative_int(
++                "VLLM_CONVERSATION_CACHE_FILTER_PREFIX_MM_INPUTS",
++                0,
++            )
++            > 0
++        )
++
++    @staticmethod
++    def _conversation_cache_int(name: str, default: int) -> int:
++        raw_value = os.environ.get(name)
++        if raw_value is None or raw_value == "":
++            return default
++        try:
++            return int(raw_value)
++        except ValueError:
++            logger.warning(
++                "Ignoring invalid %s=%r; using default %d.",
++                name,
++                raw_value,
++                default,
++            )
++            return default
++
++    @classmethod
++    def _conversation_cache_positive_int(
++        cls,
++        name: str,
++        default: int,
++    ) -> int | None:
++        value = cls._conversation_cache_int(name, default)
++        return value if value > 0 else None
++
++    @classmethod
++    def _conversation_cache_non_negative_int(
++        cls,
++        name: str,
++        default: int,
++    ) -> int:
++        return max(0, cls._conversation_cache_int(name, default))
  
      def warmup(self) -> None:
          self.renderer.warmup(
-@@ -230,7 +237,12 @@ class OpenAIServingChat(OpenAIServing):
+@@ -230,7 +287,12 @@ class OpenAIServingChat(OpenAIServing):
          self,
          request: ChatCompletionRequest,
          raw_request: Request | None = None,
@@ -929,7 +991,7 @@ index 12dc2cd..c9d5287 100644
          """
          Chat Completion API similar to OpenAI's API.
  
-@@ -239,6 +251,10 @@ class OpenAIServingChat(OpenAIServing):
+@@ -239,6 +301,10 @@ class OpenAIServingChat(OpenAIServing):
          Chat Completion API.
          """
          # Streaming response
@@ -940,7 +1002,7 @@ index 12dc2cd..c9d5287 100644
          tokenizer = self.renderer.tokenizer
          assert tokenizer is not None
          chat_template_kwargs = self._effective_chat_template_kwargs(request)
-@@ -248,11 +264,6 @@ class OpenAIServingChat(OpenAIServing):
+@@ -248,11 +314,6 @@ class OpenAIServingChat(OpenAIServing):
                  tokenizer,
                  chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
              )
@@ -952,7 +1014,7 @@ index 12dc2cd..c9d5287 100644
  
          request_id = (
              f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-@@ -262,101 +273,181 @@ class OpenAIServingChat(OpenAIServing):
+@@ -262,101 +323,184 @@ class OpenAIServingChat(OpenAIServing):
          if raw_request:
              raw_request.state.request_metadata = request_metadata
  
@@ -1014,7 +1076,10 @@ index 12dc2cd..c9d5287 100644
 -                self._extract_prompt_len(engine_input),
 -                self.default_sampling_params,
 -                self.override_max_tokens,
-+        if conversation_lease is not None:
++        if (
++            conversation_lease is not None
++            and self.conversation_cache_filter_prefix_mm_inputs
++        ):
 +            mm_error = self._filter_conversation_prefix_mm_inputs(
 +                engine_inputs,
 +                conversation_lease,
@@ -1209,7 +1274,7 @@ index 12dc2cd..c9d5287 100644
                  result_generator,
                  request_id,
                  model_name,
-@@ -364,19 +455,486 @@ class OpenAIServingChat(OpenAIServing):
+@@ -364,19 +508,549 @@ class OpenAIServingChat(OpenAIServing):
                  tokenizer,
                  request_metadata,
                  reasoning_parser,
@@ -1230,7 +1295,10 @@ index 12dc2cd..c9d5287 100644
 +            if conversation_lease is not None:
 +                await self._discard_conversation_lease(conversation_lease)
 +            raise
-+
+ 
+-        return await self.chat_completion_full_generator(
+-            request,
+-            result_generator,
 +    def _validate_conversation_cache_request(
 +        self, request: ChatCompletionRequest
 +    ) -> ErrorResponse | None:
@@ -1422,10 +1490,7 @@ index 12dc2cd..c9d5287 100644
 +            if "arrival_time" in mm_engine_input:
 +                token_input["arrival_time"] = mm_engine_input["arrival_time"]
 +            return token_input
- 
--        return await self.chat_completion_full_generator(
--            request,
--            result_generator,
++
 +        filtered_input = dict(mm_engine_input)
 +        filtered_input["mm_hashes"] = kept_hashes
 +        filtered_input["mm_placeholders"] = kept_placeholders
@@ -1452,6 +1517,31 @@ index 12dc2cd..c9d5287 100644
 +        if not request.conversation_id:
 +            return None
 +
++        if request.conversation_require_cache and not (
++            await self.conversation_cache.can_satisfy_suffix_only(
++                model=model_name,
++                cache_salt=request.cache_salt,
++                conversation_id=request.conversation_id,
++            )
++        ):
++            return self.create_error_response(
++                f"Conversation cache miss for {request.conversation_id!r}; "
++                "retry with the full conversation.",
++                err_type="ConversationCacheMissError",
++                status_code=HTTPStatus.CONFLICT,
++                param="conversation_id",
++            )
++
++        key = ConversationCacheKey(
++            model=model_name,
++            cache_salt=request.cache_salt or "",
++            conversation_id=request.conversation_id,
++        )
++        await self._trim_conversation_cache(
++            protected_keys={key},
++            reason="before acquire",
++        )
++
 +        lease = await self.conversation_cache.try_acquire(
 +            model=model_name,
 +            cache_salt=request.cache_salt,
@@ -1476,6 +1566,40 @@ index 12dc2cd..c9d5287 100644
 -            reasoning_parser,
          )
 +        return lease
++
++    async def _trim_conversation_cache(
++        self,
++        *,
++        protected_keys: set[ConversationCacheKey] | None = None,
++        reason: str,
++    ) -> None:
++        evicted_keys = await self.conversation_cache.trim_lru(
++            max_entries=self.conversation_cache_max_entries,
++            max_tokens=self.conversation_cache_max_tokens,
++            protected_keys=protected_keys,
++        )
++        if not evicted_keys:
++            return
++
++        for key in evicted_keys:
++            try:
++                await self.engine_client.delete_conversation_cache(
++                    key.conversation_id,
++                    key.cache_salt,
++                )
++            except Exception:
++                logger.warning(
++                    "Failed to delete engine conversation cache for %s after "
++                    "frontend LRU eviction.",
++                    key.conversation_id,
++                    exc_info=True,
++                )
++        logger.info(
++            "Evicted %d frontend conversation cache entr%s for %s.",
++            len(evicted_keys),
++            "y" if len(evicted_keys) == 1 else "ies",
++            reason,
++        )
 +
 +    @staticmethod
 +    def _set_conversation_sampling_args(
@@ -1551,6 +1675,10 @@ index 12dc2cd..c9d5287 100644
 +            assistant_text=assistant_text,
 +            committed_messages=committed_messages,
 +            committed_prompt_token_ids=prompt_token_ids,
++        )
++        await self._trim_conversation_cache(
++            protected_keys={lease.key},
++            reason="after publish",
 +        )
 +
 +    async def _discard_conversation_lease(
@@ -1707,10 +1835,10 @@ index 12dc2cd..c9d5287 100644
          if request.add_generation_prompt:
 diff --git a/vllm/entrypoints/openai/conversation_cache.py b/vllm/entrypoints/openai/conversation_cache.py
 new file mode 100644
-index 0000000..35bee1e
+index 0000000..2d24f3d
 --- /dev/null
 +++ b/vllm/entrypoints/openai/conversation_cache.py
-@@ -0,0 +1,160 @@
+@@ -0,0 +1,228 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
@@ -1850,6 +1978,74 @@ index 0000000..35bee1e
 +            entry.last_access = time.time()
 +            if entry.lock.locked():
 +                entry.lock.release()
++
++    async def trim_lru(
++        self,
++        *,
++        max_entries: int | None = None,
++        max_tokens: int | None = None,
++        protected_keys: set[ConversationCacheKey] | None = None,
++    ) -> tuple[ConversationCacheKey, ...]:
++        if max_entries is None and max_tokens is None:
++            return ()
++
++        protected_keys = protected_keys or set()
++        async with self._guard:
++            evicted: list[ConversationCacheKey] = []
++
++            def entry_token_count(entry: ConversationFrontendEntry) -> int:
++                return len(entry.committed_prompt_token_ids or ())
++
++            def over_limit() -> bool:
++                if max_entries is not None and len(self._entries) > max_entries:
++                    return True
++                if (
++                    max_tokens is not None
++                    and sum(entry_token_count(entry) for entry in self._entries.values())
++                    > max_tokens
++                ):
++                    return True
++                return False
++
++            candidates = sorted(
++                (
++                    entry
++                    for entry in self._entries.values()
++                    if entry.key not in protected_keys
++                    and entry.state is ConversationCacheState.READY
++                    and not entry.lock.locked()
++                ),
++                key=lambda entry: (entry.last_access, entry.created_at),
++            )
++            while candidates and over_limit():
++                entry = candidates.pop(0)
++                current = self._entries.get(entry.key)
++                if (
++                    current is not entry
++                    or current.state is not ConversationCacheState.READY
++                    or current.lock.locked()
++                ):
++                    continue
++                del self._entries[entry.key]
++                evicted.append(entry.key)
++
++            return tuple(evicted)
++
++    async def can_satisfy_suffix_only(
++        self,
++        *,
++        model: str,
++        cache_salt: str | None,
++        conversation_id: str,
++    ) -> bool:
++        key = self._make_key(model, cache_salt, conversation_id)
++        async with self._guard:
++            entry = self._entries.get(key)
++            if entry is None:
++                return False
++            if entry.state is ConversationCacheState.GENERATING:
++                return True
++            return bool(entry.committed_messages or entry.committed_message_count)
 +
 +    def get_entry(
 +        self,
@@ -2059,10 +2255,10 @@ index 2f10302..ea3cbe5 100644
  
 diff --git a/vllm/v1/core/conversation_cache.py b/vllm/v1/core/conversation_cache.py
 new file mode 100644
-index 0000000..281693c
+index 0000000..66c9f11
 --- /dev/null
 +++ b/vllm/v1/core/conversation_cache.py
-@@ -0,0 +1,350 @@
+@@ -0,0 +1,420 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
@@ -2376,6 +2572,63 @@ index 0000000..281693c
 +    ) -> PendingConversationEngineState | None:
 +        return self._pending.get(self.make_key(conversation_id, cache_salt))
 +
++    def committed_count(self) -> int:
++        return len(self._committed)
++
++    def committed_token_count(self) -> int:
++        return sum(state.token_count for state in self._committed.values())
++
++    def trim_committed_lru_with_released(
++        self,
++        *,
++        max_entries: int | None = None,
++        max_tokens: int | None = None,
++        protected_keys: set[ConversationEngineCacheKey] | None = None,
++        now: float | None = None,
++    ) -> ConversationCacheMutation:
++        now = time.monotonic() if now is None else now
++        release_states = list(
++            self.expire_pending_with_released(now=now).release_states
++        )
++        protected_keys = protected_keys or set()
++
++        def over_limit() -> bool:
++            if max_entries is not None and len(self._committed) > max_entries:
++                return True
++            if max_tokens is not None and self.committed_token_count() > max_tokens:
++                return True
++            return False
++
++        candidates = self._lru_committed_candidates(protected_keys)
++        while candidates and over_limit():
++            state = candidates.pop(0)
++            if self._committed.pop(state.key, None) is not None:
++                release_states.append(state)
++
++        return ConversationCacheMutation(True, tuple(release_states))
++
++    def pop_lru_committed_with_released(
++        self,
++        *,
++        protected_keys: set[ConversationEngineCacheKey] | None = None,
++        max_count: int = 1,
++        now: float | None = None,
++    ) -> ConversationCacheMutation:
++        now = time.monotonic() if now is None else now
++        release_states = list(
++            self.expire_pending_with_released(now=now).release_states
++        )
++        if max_count <= 0:
++            return ConversationCacheMutation(True, tuple(release_states))
++
++        protected_keys = protected_keys or set()
++        candidates = self._lru_committed_candidates(protected_keys)
++        for state in candidates[:max_count]:
++            if self._committed.pop(state.key, None) is not None:
++                release_states.append(state)
++
++        return ConversationCacheMutation(True, tuple(release_states))
++
 +    def expire_pending(self, *, now: float | None = None) -> int:
 +        return len(self.expire_pending_with_released(now=now).release_states)
 +
@@ -2405,6 +2658,19 @@ index 0000000..281693c
 +        return ConversationEngineCacheKey(
 +            conversation_id=conversation_id,
 +            cache_salt=cache_salt or "",
++        )
++
++    def _lru_committed_candidates(
++        self,
++        protected_keys: set[ConversationEngineCacheKey],
++    ) -> list[ConversationEngineState]:
++        return sorted(
++            (
++                state
++                for key, state in self._committed.items()
++                if key not in protected_keys and key not in self._pending
++            ),
++            key=lambda state: (state.last_access, state.created_at),
 +        )
 +
 +    @staticmethod
@@ -2726,23 +2992,32 @@ index bdb97de..902f9f7 100644
      def make_empty(cls) -> "SchedulerOutput":
          return cls(
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index 395fa80..f95cff7 100644
+index 395fa80..db0b8f8 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
-@@ -32,6 +32,12 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+@@ -1,6 +1,7 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ import itertools
++import os
+ import time
+ from collections import defaultdict, deque
+ from collections.abc import Iterable
+@@ -32,6 +33,13 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
  )
  from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
  from vllm.multimodal.encoder_budget import MultiModalBudget
 +from vllm.v1.core.conversation_cache import (
 +    ConversationBlockCopy,
 +    ConversationEngineCache,
++    ConversationEngineCacheKey,
 +    ConversationEngineState,
 +    ConversationMambaTerminalStateRef,
 +)
  from vllm.v1.core.encoder_cache_manager import (
      EncoderCacheManager,
      EncoderDecoderCacheManager,
-@@ -54,7 +60,11 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
+@@ -54,7 +62,11 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
  from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
  from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
  from vllm.v1.metrics.perf import ModelMetrics, PerfStats
@@ -2755,7 +3030,7 @@ index 395fa80..f95cff7 100644
  from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
  from vllm.v1.request import Request, RequestStatus, StreamingUpdate
  from vllm.v1.spec_decode.metrics import SpecDecodingStats
-@@ -120,6 +130,9 @@ class Scheduler(SchedulerInterface):
+@@ -120,6 +132,9 @@ class Scheduler(SchedulerInterface):
          # KV Connector pushes/pull of remote KVs for P/D and offloading.
          self.connector = None
          self.connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -2765,16 +3040,84 @@ index 395fa80..f95cff7 100644
          self.recompute_kv_load_failures = True
          if self.vllm_config.kv_transfer_config is not None:
              assert not self.is_encoder_decoder, (
-@@ -238,6 +251,8 @@ class Scheduler(SchedulerInterface):
+@@ -238,6 +253,33 @@ class Scheduler(SchedulerInterface):
              hash_block_size=hash_block_size,
              metrics_collector=self.kv_metrics_collector,
          )
 +        self.conversation_cache = ConversationEngineCache()
++        self.conversation_cache_max_entries = self._env_positive_int(
++            "VLLM_CONVERSATION_CACHE_MAX_ENTRIES",
++            8,
++        )
++        self.conversation_cache_max_tokens = self._env_positive_int(
++            "VLLM_CONVERSATION_CACHE_MAX_TOKENS",
++            max(self.max_model_len * 4, self.max_model_len),
++        )
++        default_min_free_blocks = max(16, self.max_model_len // max(self.block_size, 1))
++        self.conversation_cache_min_free_blocks = self._env_non_negative_int(
++            "VLLM_CONVERSATION_CACHE_MIN_FREE_BLOCKS",
++            default_min_free_blocks,
++        )
++        self.conversation_cache_target_free_blocks = self._env_non_negative_int(
++            "VLLM_CONVERSATION_CACHE_TARGET_FREE_BLOCKS",
++            max(default_min_free_blocks * 2, default_min_free_blocks),
++        )
++        if (
++            self.conversation_cache_min_free_blocks
++            and self.conversation_cache_target_free_blocks
++            < self.conversation_cache_min_free_blocks
++        ):
++            self.conversation_cache_target_free_blocks = (
++                self.conversation_cache_min_free_blocks
++            )
 +        self._conversation_block_copies_to_run: list[ConversationBlockCopy] = []
          # Bind GPU block pool to the KV connector. This must happen after
          # kv_cache_manager is constructed so block_pool is available.
          if self.connector is not None and hasattr(
-@@ -914,11 +929,12 @@ class Scheduler(SchedulerInterface):
+@@ -299,6 +341,31 @@ class Scheduler(SchedulerInterface):
+ 
+         self._pause_state: PauseState = PauseState.UNPAUSED
+ 
++    @staticmethod
++    def _env_int(name: str, default: int) -> int:
++        raw_value = os.environ.get(name)
++        if raw_value is None or raw_value == "":
++            return default
++        try:
++            return int(raw_value)
++        except ValueError:
++            logger.warning(
++                "Ignoring invalid %s=%r; using default %d.",
++                name,
++                raw_value,
++                default,
++            )
++            return default
++
++    @classmethod
++    def _env_positive_int(cls, name: str, default: int) -> int | None:
++        value = cls._env_int(name, default)
++        return value if value > 0 else None
++
++    @classmethod
++    def _env_non_negative_int(cls, name: str, default: int) -> int:
++        return max(0, cls._env_int(name, default))
++
+     def _mamba_block_aligned_split(
+         self,
+         request: Request,
+@@ -383,6 +450,10 @@ class Scheduler(SchedulerInterface):
+         scheduled_timestamp = time.monotonic()
+ 
+         self.kv_cache_manager.new_step_starts()
++        self._evict_conversation_cache_for_memory_pressure(
++            protected_keys=self._active_conversation_cache_keys(),
++            reason="scheduler memory pressure",
++        )
+ 
+         # First, schedule the RUNNING requests.
+         req_index = 0
+@@ -914,11 +985,12 @@ class Scheduler(SchedulerInterface):
          self.prev_step_scheduled_req_ids.clear()
          self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
  
@@ -2790,7 +3133,7 @@ index 395fa80..f95cff7 100644
  
          scheduler_output = SchedulerOutput(
              scheduled_new_reqs=new_reqs_data,
-@@ -936,6 +952,7 @@ class Scheduler(SchedulerInterface):
+@@ -936,6 +1008,7 @@ class Scheduler(SchedulerInterface):
              finished_req_ids=self.finished_req_ids,
              free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
              new_block_ids_to_zero=new_block_ids_to_zero,
@@ -2798,7 +3141,7 @@ index 395fa80..f95cff7 100644
          )
  
          # NOTE(Kuntai): this function is designed for multiple purposes:
-@@ -1438,6 +1455,7 @@ class Scheduler(SchedulerInterface):
+@@ -1438,6 +1511,7 @@ class Scheduler(SchedulerInterface):
                  finish_reason = request.get_finished_reason()
                  finished = self._handle_stopped_request(request)
                  if finished:
@@ -2806,7 +3149,7 @@ index 395fa80..f95cff7 100644
                      kv_transfer_params = self._free_request(request)
  
                  if status_before_stop == RequestStatus.RUNNING:
-@@ -1755,11 +1773,104 @@ class Scheduler(SchedulerInterface):
+@@ -1755,11 +1829,138 @@ class Scheduler(SchedulerInterface):
          else:
              if request.resumable:
                  request.streaming_queue = deque()
@@ -2823,6 +3166,10 @@ index 395fa80..f95cff7 100644
 +            return
 +
 +        conversation_cache_hits = 0
++        key = self.conversation_cache.make_key(
++            request.conversation_id,
++            request.cache_salt,
++        )
 +        state = self.conversation_cache.get_committed(
 +            conversation_id=request.conversation_id,
 +            cache_salt=request.cache_salt,
@@ -2858,14 +3205,44 @@ index 395fa80..f95cff7 100644
 +                )
 +            )
 +        except ValueError as exc:
-+            logger.debug(
-+                "Conversation cache attach skipped for %s generation %s: %s",
-+                request.conversation_id,
-+                request.conversation_generation_id,
-+                exc,
-+            )
-+            self._record_conversation_cache_stats(request, conversation_cache_hits)
-+            return
++            if (
++                "No free blocks" in str(exc)
++                and self._evict_conversation_cache_for_memory_pressure(
++                    protected_keys={*self._active_conversation_cache_keys(), key},
++                    reason="conversation cache attach",
++                    force=True,
++                )
++            ):
++                try:
++                    _attached_blocks, copies = (
++                        self.kv_cache_manager.attach_conversation_blocks_copy_on_write(
++                            request.request_id,
++                            state.block_refs_by_group,
++                            token_count=state.token_count,
++                            mamba_terminal_refs=mamba_terminal_refs,
++                        )
++                    )
++                except ValueError as retry_exc:
++                    logger.debug(
++                        "Conversation cache attach skipped for %s generation %s "
++                        "after eviction: %s",
++                        request.conversation_id,
++                        request.conversation_generation_id,
++                        retry_exc,
++                    )
++                    self._record_conversation_cache_stats(
++                        request, conversation_cache_hits
++                    )
++                    return
++            else:
++                logger.debug(
++                    "Conversation cache attach skipped for %s generation %s: %s",
++                    request.conversation_id,
++                    request.conversation_generation_id,
++                    exc,
++                )
++                self._record_conversation_cache_stats(request, conversation_cache_hits)
++                return
 +
 +        conversation_cache_hits = state.token_count
 +        request.num_computed_tokens = state.token_count
@@ -2911,7 +3288,7 @@ index 395fa80..f95cff7 100644
      def finish_requests(
          self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
      ) -> list[tuple[str, int]]:
-@@ -1846,6 +1957,77 @@ class Scheduler(SchedulerInterface):
+@@ -1846,6 +2047,186 @@ class Scheduler(SchedulerInterface):
          self.kv_cache_manager.free(request)
          del self.requests[request.request_id]
  
@@ -2986,10 +3363,119 @@ index 395fa80..f95cff7 100644
 +                    state.block_refs_by_group
 +                )
 +
++    def _active_conversation_cache_keys(self) -> set[ConversationEngineCacheKey]:
++        return {
++            key
++            for request in self.requests.values()
++            if (key := self._conversation_cache_key_for_request(request)) is not None
++        }
++
++    def _conversation_cache_key_for_request(
++        self,
++        request: Request,
++    ) -> ConversationEngineCacheKey | None:
++        if not request.conversation_id:
++            return None
++        return self.conversation_cache.make_key(
++            request.conversation_id,
++            request.cache_salt,
++        )
++
++    def _trim_conversation_cache_limits(
++        self,
++        *,
++        protected_keys: set[ConversationEngineCacheKey] | None = None,
++        reason: str,
++    ) -> bool:
++        if (
++            self.conversation_cache_max_entries is None
++            and self.conversation_cache_max_tokens is None
++        ):
++            return False
++
++        mutation = self.conversation_cache.trim_committed_lru_with_released(
++            max_entries=self.conversation_cache_max_entries,
++            max_tokens=self.conversation_cache_max_tokens,
++            protected_keys=protected_keys,
++        )
++        states = mutation.release_states
++        if not states:
++            return False
++
++        released_tokens = sum(state.token_count for state in states)
++        self._release_conversation_states(states)
++        logger.info(
++            "Evicted %d conversation cache state(s) (%d tokens) for %s; "
++            "committed_entries=%d committed_tokens=%d free_blocks=%d.",
++            len(states),
++            released_tokens,
++            reason,
++            self.conversation_cache.committed_count(),
++            self.conversation_cache.committed_token_count(),
++            self.kv_cache_manager.block_pool.get_num_free_blocks(),
++        )
++        return True
++
++    def _evict_conversation_cache_for_memory_pressure(
++        self,
++        *,
++        protected_keys: set[ConversationEngineCacheKey] | None = None,
++        reason: str,
++        force: bool = False,
++        target_free_blocks: int | None = None,
++    ) -> bool:
++        free_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks()
++        min_free_blocks = self.conversation_cache_min_free_blocks
++        if not force and (
++            min_free_blocks <= 0 or free_blocks >= min_free_blocks
++        ):
++            return False
++
++        target = target_free_blocks
++        if target is None:
++            target = self.conversation_cache_target_free_blocks
++        if force:
++            target = max(target, free_blocks + 1)
++        if target <= 0:
++            return False
++
++        start_free_blocks = free_blocks
++        released_states = 0
++        released_tokens = 0
++        while free_blocks < target:
++            mutation = self.conversation_cache.pop_lru_committed_with_released(
++                protected_keys=protected_keys,
++                max_count=1,
++            )
++            states = mutation.release_states
++            if not states:
++                break
++
++            released_states += len(states)
++            released_tokens += sum(state.token_count for state in states)
++            self._release_conversation_states(states)
++            free_blocks = self.kv_cache_manager.block_pool.get_num_free_blocks()
++
++        if released_states == 0:
++            return False
++
++        logger.info(
++            "Evicted %d conversation cache state(s) (%d tokens) for %s; "
++            "free_blocks=%d -> %d target=%d committed_entries=%d.",
++            released_states,
++            released_tokens,
++            reason,
++            start_free_blocks,
++            free_blocks,
++            target,
++            self.conversation_cache.committed_count(),
++        )
++        return True
++
      @property
      def pause_state(self) -> PauseState:
          return self._pause_state
-@@ -1936,6 +2118,58 @@ class Scheduler(SchedulerInterface):
+@@ -1936,6 +2317,69 @@ class Scheduler(SchedulerInterface):
          """
          self.encoder_cache_manager.reset()
  
@@ -2999,12 +3485,23 @@ index 395fa80..f95cff7 100644
 +        cache_salt: str | None,
 +        generation_id: str,
 +    ) -> bool:
++        key = self.conversation_cache.make_key(conversation_id, cache_salt)
 +        mutation = self.conversation_cache.publish_with_released(
 +            conversation_id=conversation_id,
 +            cache_salt=cache_salt,
 +            generation_id=generation_id,
 +        )
 +        self._release_conversation_states(mutation.release_states)
++        if mutation.ok:
++            protected_keys = {*self._active_conversation_cache_keys(), key}
++            self._trim_conversation_cache_limits(
++                protected_keys=protected_keys,
++                reason="conversation cache limits",
++            )
++            self._evict_conversation_cache_for_memory_pressure(
++                protected_keys=protected_keys,
++                reason="post-publish memory pressure",
++            )
 +        return mutation.ok
 +
 +    def discard_conversation_cache_pending(
@@ -3048,7 +3545,7 @@ index 395fa80..f95cff7 100644
      def make_stats(
          self,
          spec_decoding_stats: SpecDecodingStats | None = None,
-@@ -1951,6 +2185,9 @@ class Scheduler(SchedulerInterface):
+@@ -1951,6 +2395,9 @@ class Scheduler(SchedulerInterface):
          if self.connector_prefix_cache_stats is not None:
              connector_prefix_cache_stats = self.connector_prefix_cache_stats
              self.connector_prefix_cache_stats = PrefixCacheStats()
@@ -3058,7 +3555,7 @@ index 395fa80..f95cff7 100644
          eviction_events = (
              self.kv_metrics_collector.drain_events()
              if self.kv_metrics_collector is not None
-@@ -1967,6 +2204,7 @@ class Scheduler(SchedulerInterface):
+@@ -1967,6 +2414,7 @@ class Scheduler(SchedulerInterface):
              kv_cache_usage=self.kv_cache_manager.usage,
              prefix_cache_stats=prefix_cache_stats,
              connector_prefix_cache_stats=connector_prefix_cache_stats,

@@ -16,6 +16,7 @@ __pycache__/
 
 # Runtime artifacts.
 *.log
+*.log.*.bak
 *.pid
 conversation-prefix-cache*-results.json
 
@@ -23,4 +24,3 @@ conversation-prefix-cache*-results.json
 /media/*
 !/media/cartesia-unicorn.wav
 !/media/cartesia-unicorn-followup.wav
-

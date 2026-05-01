@@ -20,8 +20,8 @@ import io
 import json
 import os
 import time
-import uuid
 import wave
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,7 +56,17 @@ DEFAULT_VOICE_SYSTEM_INSTRUCTION = (
     "brief, direct, and conversational, usually one or two short sentences. Do not "
     "use Markdown, bullet points, numbered lists, code blocks, tables, emojis, "
     "emoticons, decorative symbols, or special formatting. Avoid long lists. Do not "
-    "mention these formatting rules unless asked."
+    "mention these formatting rules unless asked. When you use a tool, treat the "
+    "latest tool result as ground truth. If the tool result contains stdout and "
+    "stderr sections, use both sections to answer. Some successful commands write "
+    "normal help or diagnostic text to stderr, so do not say a command is missing "
+    "just because useful output appears in stderr. The client separately displays "
+    "raw bash commands and raw terminal output, so do not read ASCII art, borders, "
+    "terminal markup, or long command output literally unless the user explicitly "
+    "asks you to. Interpret the result and explain the useful meaning briefly. "
+    "For cowthink or cowsay-style output, focus on the message inside the bubble "
+    "and say that the command rendered it as ASCII art. The user may ask about "
+    "the Unix tool cowthink; use the bash tool to inspect it when needed."
 )
 
 BASH_TOOL_NAME = "run_bash"
@@ -66,8 +76,12 @@ BASH_TOOL_DEFINITION: dict[str, Any] = {
         "name": BASH_TOOL_NAME,
         "description": (
             "Execute arbitrary bash code in the local project workspace and return "
-            "stdout, stderr, and the exit code. Use this when the user asks you to "
-            "inspect or operate on the local machine. Examples: use "
+            "the command output. If only stdout or only stderr has content, the "
+            "tool returns that content directly. If both streams have content, "
+            "stdout is wrapped in <stdout>...</stdout> and stderr is wrapped in "
+            "<stderr>...</stderr>. Some programs write normal help or diagnostic "
+            "text to stderr even when they succeed. Use this when the user asks "
+            "you to inspect or operate on the local machine. Examples: use "
             "`git branch --show-current` to see the current git branch; use "
             "`find . -maxdepth 1 -type f | wc -l` to count files in this directory; "
             "use `find . -type f | wc -l` to count files total in this project."
@@ -92,6 +106,10 @@ class ChatCompletionPassResult:
     output_text: str
     tool_calls: list[dict[str, Any]]
     first_token: bool
+
+
+class ConversationCacheMissError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -149,6 +167,7 @@ class NemotronOmniAudioLLMService(LLMService):
         bash_tool_timeout_secs: float = 20.0,
         bash_tool_max_output_chars: int = 12000,
         bash_tool_max_rounds: int = 3,
+        bash_tool_event_sender: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
         **kwargs,
     ):
         """Initialize the service.
@@ -179,6 +198,8 @@ class NemotronOmniAudioLLMService(LLMService):
             bash_tool_timeout_secs: Maximum runtime for one bash tool call.
             bash_tool_max_output_chars: Maximum stdout or stderr characters returned.
             bash_tool_max_rounds: Maximum tool-call iterations for one model response.
+            bash_tool_event_sender: Optional async callback for publishing
+                structured bash tool events to clients.
             **kwargs: Additional arguments for ``LLMService``.
         """
         default_settings = self.Settings(
@@ -226,6 +247,7 @@ class NemotronOmniAudioLLMService(LLMService):
         self._bash_tool_timeout_secs = bash_tool_timeout_secs
         self._bash_tool_max_output_chars = bash_tool_max_output_chars
         self._bash_tool_max_rounds = bash_tool_max_rounds
+        self._bash_tool_event_sender = bash_tool_event_sender
 
         self._session: aiohttp.ClientSession | None = None
         self._generation_task: asyncio.Task | None = None
@@ -477,13 +499,17 @@ class NemotronOmniAudioLLMService(LLMService):
         return f"data:audio/wav;base64,{encoded}"
 
     def _build_payload_from_messages(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
-        messages = self._conversation_payload_messages(messages)
+        full_messages = copy.deepcopy(messages)
+        messages, requires_cache = self._conversation_payload_messages(messages)
         payload: dict[str, Any] = {
             "model": self._settings.model,
             "messages": messages,
             "stream": True,
             "stream_options": {"include_usage": True},
+            "_conversation_full_messages": full_messages,
         }
+        if requires_cache:
+            payload["conversation_require_cache"] = True
         if self._enable_bash_tool:
             payload["tools"] = [BASH_TOOL_DEFINITION]
             payload["tool_choice"] = "auto"
@@ -516,13 +542,13 @@ class NemotronOmniAudioLLMService(LLMService):
     def _conversation_payload_messages(
         self,
         messages: list[dict[str, Any]],
-    ) -> list[dict[str, Any]]:
+    ) -> tuple[list[dict[str, Any]], bool]:
         if (
             not self._conversation_id
             or not self._suffix_only_conversation
             or not self._conversation_cache_committed
         ):
-            return messages
+            return messages, False
 
         latest_user = self._latest_user_message(messages, require_audio=True)
         if latest_user is None:
@@ -532,13 +558,13 @@ class NemotronOmniAudioLLMService(LLMService):
                 f"{self}: suffix-only conversation mode found no user message; "
                 "sending full context"
             )
-            return messages
+            return messages, False
 
         logger.debug(
             f"{self}: suffix-only conversation payload uses latest user message "
             f"with {self._count_audio_parts([latest_user])} audio parts"
         )
-        return [latest_user]
+        return [latest_user], True
 
     def _latest_user_message(
         self,
@@ -680,7 +706,6 @@ class NemotronOmniAudioLLMService(LLMService):
         first_token = True
         output_text_parts: list[str] = []
         tool_rounds = 0
-        used_tools = False
         completed = False
 
         try:
@@ -705,12 +730,27 @@ class NemotronOmniAudioLLMService(LLMService):
             logger.debug(f"{self}: sending {request_description}{cache_info}")
 
             current_payload = copy.deepcopy(payload)
+            retried_full_context = False
             while True:
-                result = await self._stream_completion_pass(
-                    current_payload,
-                    headers=headers,
-                    first_token=first_token,
-                )
+                try:
+                    result = await self._stream_completion_pass(
+                        current_payload,
+                        headers=headers,
+                        first_token=first_token,
+                    )
+                except ConversationCacheMissError:
+                    if retried_full_context:
+                        raise
+                    full_payload = self._full_context_retry_payload(current_payload)
+                    if full_payload is None:
+                        raise
+                    retried_full_context = True
+                    current_payload = full_payload
+                    logger.info(
+                        f"{self}: conversation cache miss for "
+                        f"{self._conversation_id}; retrying with full context"
+                    )
+                    continue
                 first_token = result.first_token
                 if result.output_text:
                     output_text_parts.append(result.output_text)
@@ -732,7 +772,6 @@ class NemotronOmniAudioLLMService(LLMService):
                     break
 
                 tool_rounds += 1
-                used_tools = True
                 logger.debug(
                     f"{self}: executing {len(result.tool_calls)} tool call(s) "
                     f"for round {tool_rounds}"
@@ -745,8 +784,6 @@ class NemotronOmniAudioLLMService(LLMService):
                 )
 
             completed = True
-            if used_tools:
-                self._rotate_conversation_id_after_tool_use()
             logger.debug(
                 f"{self}: completed response in {time.perf_counter() - started_at:.3f}s: "
                 f"{''.join(output_text_parts)!r}"
@@ -777,12 +814,16 @@ class NemotronOmniAudioLLMService(LLMService):
 
         async with self._session.post(
             self._chat_completions_url,
-            json=payload,
+            json=self._http_payload(payload),
             headers=headers,
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
-                raise RuntimeError(f"vLLM request failed with {response.status}: {error_text}")
+                if self._is_conversation_cache_miss(response.status, error_text):
+                    raise ConversationCacheMissError(error_text)
+                raise RuntimeError(
+                    f"vLLM request failed with {response.status}: {error_text}"
+                )
 
             async for event in self._iter_sse_events(response):
                 if event == "[DONE]":
@@ -822,6 +863,43 @@ class NemotronOmniAudioLLMService(LLMService):
             tool_calls=self._finalize_tool_calls(tool_calls_by_index),
             first_token=first_token,
         )
+
+    @staticmethod
+    def _http_payload(payload: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in payload.items()
+            if not key.startswith("_")
+        }
+
+    @staticmethod
+    def _is_conversation_cache_miss(status: int, error_text: str) -> bool:
+        if status != 409:
+            return False
+        try:
+            data = json.loads(error_text)
+        except json.JSONDecodeError:
+            return False
+        error = data.get("error")
+        if not isinstance(error, dict):
+            return False
+        return error.get("type") == "ConversationCacheMissError"
+
+    def _full_context_retry_payload(
+        self,
+        payload: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        full_messages = payload.get("_conversation_full_messages")
+        if not isinstance(full_messages, list):
+            logger.warning(
+                f"{self}: cannot retry conversation cache miss without full messages"
+            )
+            return None
+
+        retry_payload = copy.deepcopy(payload)
+        retry_payload["messages"] = copy.deepcopy(full_messages)
+        retry_payload.pop("conversation_require_cache", None)
+        return retry_payload
 
     @staticmethod
     def _merge_tool_call_delta(
@@ -881,20 +959,16 @@ class NemotronOmniAudioLLMService(LLMService):
             self._assistant_tool_call_message(tool_calls),
             *tool_messages,
         ]
+        full_messages = next_payload.get("_conversation_full_messages")
+        if isinstance(full_messages, list):
+            next_payload["_conversation_full_messages"] = [
+                *copy.deepcopy(full_messages),
+                self._assistant_tool_call_message(tool_calls),
+                *copy.deepcopy(tool_messages),
+            ]
         next_payload.pop("tools", None)
         next_payload.pop("tool_choice", None)
         return next_payload
-
-    def _rotate_conversation_id_after_tool_use(self) -> None:
-        if not self._conversation_id:
-            return
-        old_conversation_id = self._conversation_id
-        self._conversation_id = f"{old_conversation_id}-tool-{uuid.uuid4().hex[:8]}"
-        self._conversation_cache_committed = False
-        logger.debug(
-            f"{self}: rotated conversation_id after tool use: "
-            f"{old_conversation_id} -> {self._conversation_id}"
-        )
 
     @staticmethod
     def _assistant_tool_call_message(
@@ -948,12 +1022,20 @@ class NemotronOmniAudioLLMService(LLMService):
                 error="Missing required string argument: code",
                 raw_arguments=arguments_text,
             )
-        return await self._run_bash_tool(code)
+        return await self._run_bash_tool(code, tool_call_id=tool_call.get("id") or "call_0")
 
-    async def _run_bash_tool(self, code: str) -> str:
+    async def _run_bash_tool(self, code: str, *, tool_call_id: str) -> str:
         started_at = time.perf_counter()
         logger.debug(
             f"{self}: running bash tool in {self._bash_tool_cwd!r}: {code!r}"
+        )
+        await self._send_bash_tool_event(
+            {
+                "phase": "start",
+                "tool_call_id": tool_call_id,
+                "code": code,
+                "cwd": self._bash_tool_cwd,
+            }
         )
         try:
             process = await asyncio.create_subprocess_exec(
@@ -965,7 +1047,27 @@ class NemotronOmniAudioLLMService(LLMService):
                 stderr=asyncio.subprocess.PIPE,
             )
         except Exception as exc:
-            return self._tool_result_json(ok=False, error=f"Failed to start bash: {exc}")
+            result = self._build_bash_tool_result(
+                command=code,
+                command_started=False,
+                exit_code=None,
+                stdout_text="",
+                stderr_text="",
+                timed_out=False,
+                elapsed_secs=time.perf_counter() - started_at,
+                error=f"Failed to start bash: {exc}",
+            )
+            self._log_bash_tool_result(tool_call_id=tool_call_id, code=code, result=result)
+            await self._send_bash_tool_event(
+                {
+                    "phase": "result",
+                    "tool_call_id": tool_call_id,
+                    "code": code,
+                    "cwd": self._bash_tool_cwd,
+                    "result": result,
+                }
+            )
+            return self._format_bash_tool_content(result)
 
         timed_out = False
         try:
@@ -980,15 +1082,148 @@ class NemotronOmniAudioLLMService(LLMService):
 
         stdout_text = stdout.decode("utf-8", errors="replace")
         stderr_text = stderr.decode("utf-8", errors="replace")
-        return self._tool_result_json(
-            ok=(process.returncode == 0 and not timed_out),
+        result = self._build_bash_tool_result(
+            command=code,
+            command_started=True,
             exit_code=process.returncode,
-            stdout=self._truncate_tool_output(stdout_text),
-            stderr=self._truncate_tool_output(stderr_text),
+            stdout_text=stdout_text,
+            stderr_text=stderr_text,
             timed_out=timed_out,
-            elapsed_secs=round(time.perf_counter() - started_at, 3),
-            cwd=self._bash_tool_cwd,
+            elapsed_secs=time.perf_counter() - started_at,
         )
+        self._log_bash_tool_result(tool_call_id=tool_call_id, code=code, result=result)
+        await self._send_bash_tool_event(
+            {
+                "phase": "result",
+                "tool_call_id": tool_call_id,
+                "code": code,
+                "cwd": self._bash_tool_cwd,
+                "result": result,
+            }
+        )
+        return self._format_bash_tool_content(result)
+
+    def _format_bash_tool_content(self, result: dict[str, Any]) -> str:
+        stdout = str(result.get("stdout") or "")
+        stderr = str(result.get("stderr") or "")
+
+        if stdout and stderr:
+            return f"<stdout>{stdout}</stdout>\n<stderr>{stderr}</stderr>"
+        if stdout:
+            return stdout
+        if stderr:
+            return stderr
+
+        error = result.get("error")
+        if error:
+            return str(error)
+        if result.get("timed_out"):
+            return f"Command timed out after {self._bash_tool_timeout_secs:g} seconds."
+        return "Command completed with no output."
+
+    def _build_bash_tool_result(
+        self,
+        *,
+        command: str,
+        command_started: bool,
+        exit_code: int | None,
+        stdout_text: str,
+        stderr_text: str,
+        timed_out: bool,
+        elapsed_secs: float,
+        error: str | None = None,
+    ) -> dict[str, Any]:
+        stdout_truncated = len(stdout_text) > self._bash_tool_max_output_chars
+        stderr_truncated = len(stderr_text) > self._bash_tool_max_output_chars
+        command_not_found = command_started and exit_code == 127
+        ok = command_started and exit_code == 0 and not timed_out and error is None
+
+        if ok:
+            status = "success"
+            summary = "Command completed successfully."
+            if stderr_text:
+                summary += (
+                    " The command wrote output to stderr, but exit_code is 0 so "
+                    "that stderr output should not by itself be treated as failure."
+                )
+            assistant_guidance = (
+                "The command succeeded. Answer from stdout and stderr. Do not say "
+                "the command is missing or unrecognized."
+            )
+        elif timed_out:
+            status = "timed_out"
+            summary = f"Command timed out after {self._bash_tool_timeout_secs:g} seconds."
+            assistant_guidance = (
+                "The command timed out. Tell the user it did not finish and use any "
+                "captured stdout or stderr if relevant."
+            )
+        elif not command_started:
+            status = "failed_to_start"
+            summary = error or "Command could not be started."
+            assistant_guidance = "Bash could not start. Tell the user the tool failed to run."
+        elif command_not_found:
+            status = "command_not_found"
+            summary = "Command exited with 127, which usually means the shell could not find it."
+            assistant_guidance = "The command was not found. Tell the user it is missing or unavailable."
+        else:
+            status = "nonzero_exit"
+            summary = (
+                f"Command exited with status {exit_code}. Inspect stdout and stderr; "
+                "a nonzero exit code can still include useful command output."
+            )
+            assistant_guidance = (
+                "The command ran but exited nonzero. Use stdout and stderr as the "
+                "result and mention the nonzero exit code if it matters."
+            )
+
+        result: dict[str, Any] = {
+            "assistant_guidance": assistant_guidance,
+            "command": command,
+            "ok": ok,
+            "status": status,
+            "summary": summary,
+            "command_started": command_started,
+            "command_not_found": command_not_found,
+            "exit_code": exit_code,
+            "stdout": self._truncate_tool_output(stdout_text),
+            "stderr": self._truncate_tool_output(stderr_text),
+            "stdout_chars": len(stdout_text),
+            "stderr_chars": len(stderr_text),
+            "stdout_truncated": stdout_truncated,
+            "stderr_truncated": stderr_truncated,
+            "timed_out": timed_out,
+            "elapsed_secs": round(elapsed_secs, 3),
+            "cwd": self._bash_tool_cwd,
+        }
+        if error:
+            result["error"] = error
+        return result
+
+    def _log_bash_tool_result(
+        self,
+        *,
+        tool_call_id: str,
+        code: str,
+        result: dict[str, Any],
+    ) -> None:
+        logger.debug(
+            f"{self}: model-facing bash tool result for {tool_call_id} "
+            f"({code!r}): {self._tool_result_json(**result)}"
+        )
+
+    async def _send_bash_tool_event(self, payload: dict[str, Any]) -> None:
+        if not self._bash_tool_event_sender:
+            return
+
+        message = {
+            "type": "bash-tool",
+            "timestamp": time.time(),
+            **payload,
+        }
+        try:
+            await self._bash_tool_event_sender(message)
+        except Exception as exc:
+            logger.warning(f"{self}: failed to send bash tool RTVI event: {exc}")
 
     def _truncate_tool_output(self, text: str) -> str:
         if len(text) <= self._bash_tool_max_output_chars:

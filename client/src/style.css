@@ -1,0 +1,120 @@
+@import "@pipecat-ai/voice-ui-kit/styles.css";
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+.terminal-panel {
+  background: #f6f8fa;
+  color: #1f2328;
+}
+
+.terminal-screen {
+  min-height: 100%;
+  padding: 12px;
+  font-family:
+    "Geist Mono Variable", ui-monospace, SFMono-Regular, Menlo, Monaco,
+    Consolas, "Liberation Mono", "Courier New", monospace;
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.55;
+}
+
+.terminal-entry + .terminal-entry {
+  margin-top: 14px;
+}
+
+.terminal-command {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  column-gap: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.terminal-prompt,
+.terminal-cursor {
+  color: #087f5b;
+  font-weight: 700;
+}
+
+.terminal-output,
+.terminal-error {
+  margin: 6px 0 0 18px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.terminal-error {
+  color: #b42318;
+}
+
+.terminal-status {
+  margin: 4px 0 0 18px;
+  color: #6e7781;
+}
+
+.bot-audio-panel {
+  flex: 0 0 52px !important;
+  margin-top: 0 !important;
+  max-height: 52px;
+  min-height: 52px;
+  overflow: hidden;
+}
+
+.bot-audio-panel [data-slot="panel-header"] {
+  min-height: 20px;
+  padding: 4px 8px !important;
+}
+
+.bot-audio-panel [data-slot="panel-content"] {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+  padding: 2px 8px 5px !important;
+}
+
+.bot-audio-panel [data-slot="panel-content"] > div {
+  min-height: 0;
+}
+
+.bot-audio-panel .text-subtle span {
+  display: none;
+}
+
+.rtvi-events-panel {
+  display: flex;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.rtvi-events-panel [data-slot="panel"] {
+  flex: 1 1 auto;
+  height: 100%;
+  max-height: 100%;
+  margin-top: 0 !important;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+  width: 100%;
+}
+
+.rtvi-events-panel [data-slot="panel-content"] {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto !important;
+  width: 100%;
+}
+
+.rtvi-events-panel [data-slot="panel-content"] > div {
+  grid-template-columns: max-content max-content max-content !important;
+  min-width: 880px;
+  width: max-content;
+}
+
+.rtvi-events-panel [data-slot="panel-content"] > div > div {
+  white-space: nowrap;
+}
