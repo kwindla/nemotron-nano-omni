@@ -1,0 +1,28 @@
+[project]
+name = "nemotron-nano-omni-workspace"
+version = "0.1.0"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[dependency-groups]
+asr = [
+    "aiohttp>=3.9.0",
+    "loguru>=0.7.0",
+    "numpy>=1.26.0",
+    "omegaconf>=2.3.0",
+]
+vllm-test = [
+    "pytest==8.3.5",
+    "pytest-asyncio==0.24.0",
+    "pytest-cov==6.3.0",
+    "pytest-forked==1.6.0",
+    "pytest-mock==3.14.0",
+    "pytest-rerunfailures==14.0",
+    "pytest-shard==0.1.2",
+    "pytest-subtests==0.14.1",
+    "pytest-timeout==2.3.1",
+    "tblib==3.1.0",
+]
+
+[tool.uv]
+package = false

@@ -1,0 +1,27 @@
+{
+  "checkouts": {
+    "vllm-v0.20.0": {
+      "url": "https://github.com/vllm-project/vllm.git",
+      "commit": "88d34c6409e9fb3c7b8ca0c04756f061d2099eb1",
+      "patches": [
+        "patches/vllm-nemotron-omni-conversation-cache.patch"
+      ]
+    },
+    "pipecat-core-code": {
+      "url": "git@github.com:pipecat-ai/pipecat.git",
+      "commit": "9697abe559d6f04e89e0888d5c32c1fcb140b60a",
+      "patches": []
+    },
+    "pocket-tts": {
+      "url": "https://github.com/kyutai-labs/pocket-tts.git",
+      "commit": "d5296066",
+      "patches": []
+    },
+    "NeMo": {
+      "url": "https://github.com/NVIDIA-NeMo/NeMo.git",
+      "commit": "056d93754",
+      "patches": []
+    }
+  }
+}
+

@@ -1,0 +1,4005 @@
+From 5ebe459d8e7ec25b017d24ddb2d777e96a190a3b Mon Sep 17 00:00:00 2001
+From: Kwindla Hultman Kramer <kwindla@gmail.com>
+Date: Thu, 30 Apr 2026 16:24:41 -0700
+Subject: [PATCH] Add Nemotron Omni conversation cache
+
+Add OpenAI chat conversation_id support with a frontend ledger, suffix-only reconstruction, exact KV/Mamba cache attach and publish lifecycle, conversation-cache metrics, and coverage for text/audio suffix-only reuse.
+---
+ .../chat_completion/test_serving_chat.py      |  51 ++
+ .../openai/test_conversation_cache.py         | 666 ++++++++++++++++++
+ vllm/engine/protocol.py                       |  39 +
+ .../openai/chat_completion/api_router.py      |  11 +
+ .../openai/chat_completion/protocol.py        |  24 +-
+ .../openai/chat_completion/serving.py         | 650 ++++++++++++++---
+ vllm/entrypoints/openai/conversation_cache.py | 160 +++++
+ vllm/entrypoints/serve/render/serving.py      |  10 +-
+ vllm/inputs/engine.py                         |  16 +
+ vllm/inputs/llm.py                            |   5 +
+ vllm/inputs/preprocess.py                     |   4 +
+ vllm/renderers/base.py                        |   5 +
+ vllm/v1/core/conversation_cache.py            | 350 +++++++++
+ vllm/v1/core/kv_cache_manager.py              | 258 ++++++-
+ vllm/v1/core/sched/output.py                  |  15 +
+ vllm/v1/core/sched/scheduler.py               | 246 ++++++-
+ vllm/v1/core/single_type_kv_cache_manager.py  | 164 +++++
+ vllm/v1/engine/__init__.py                    |   3 +
+ vllm/v1/engine/async_llm.py                   |  39 +
+ vllm/v1/engine/core.py                        |  37 +
+ vllm/v1/engine/core_client.py                 | 224 ++++++
+ vllm/v1/engine/input_processor.py             |  20 +
+ vllm/v1/metrics/loggers.py                    |  37 +
+ vllm/v1/metrics/stats.py                      |  20 +
+ vllm/v1/request.py                            |  14 +
+ vllm/v1/worker/gpu_model_runner.py            |  94 +++
+ vllm/v1/worker/mamba_utils.py                 |  95 +++
+ 27 files changed, 3156 insertions(+), 101 deletions(-)
+ create mode 100644 tests/entrypoints/openai/test_conversation_cache.py
+ create mode 100644 vllm/entrypoints/openai/conversation_cache.py
+ create mode 100644 vllm/v1/core/conversation_cache.py
+
+diff --git a/tests/entrypoints/openai/chat_completion/test_serving_chat.py b/tests/entrypoints/openai/chat_completion/test_serving_chat.py
+index 39d59d2..d28cb51 100644
+--- a/tests/entrypoints/openai/chat_completion/test_serving_chat.py
++++ b/tests/entrypoints/openai/chat_completion/test_serving_chat.py
+@@ -984,6 +984,57 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
+     assert captured_inputs[0]["cache_salt"] == "test_salt"
+ 
+ 
++@pytest.mark.parametrize("model_type", ["gpt_oss", "any"])
++@pytest.mark.asyncio
++async def test_serving_chat_did_set_correct_conversation_id(model_type):
++    mock_model_config = MockModelConfig()
++    mock_model_config.hf_config.model_type = model_type
++
++    mock_engine = MagicMock(spec=AsyncLLM)
++    mock_engine.errored = False
++    mock_engine.model_config = mock_model_config
++    mock_engine.input_processor = MagicMock()
++    mock_engine.renderer = _build_renderer(mock_engine.model_config)
++
++    serving_chat = _build_serving_chat(mock_engine)
++
++    orig_render_chat_request = serving_chat.render_chat_request
++    captured_inputs = []
++
++    async def render_chat_request(request):
++        result = await orig_render_chat_request(request)
++
++        assert isinstance(result, tuple)
++        conversation, engine_inputs = result
++        captured_inputs.extend(engine_inputs)
++
++        return result
++
++    serving_chat.render_chat_request = render_chat_request
++
++    req = ChatCompletionRequest(
++        model=MODEL_NAME,
++        messages=[{"role": "user", "content": "what is 1+1?"}],
++    )
++
++    with suppress(Exception):
++        await serving_chat.create_chat_completion(req)
++
++    assert len(captured_inputs) == 1
++    assert "conversation_id" not in captured_inputs[0]
++
++    captured_inputs.clear()
++
++    req.conversation_id = "conversation-test"
++    with suppress(Exception):
++        await serving_chat.create_chat_completion(req)
++
++    assert len(captured_inputs) == 1
++    assert captured_inputs[0]["conversation_id"] == "conversation-test"
++    sampling_params = mock_engine.generate.call_args.args[1]
++    assert sampling_params.extra_args["conversation_id"] == "conversation-test"
++
++
+ @pytest.mark.asyncio
+ async def test_serving_chat_data_parallel_rank_extraction():
+     """Test that data_parallel_rank is properly extracted from header and
+diff --git a/tests/entrypoints/openai/test_conversation_cache.py b/tests/entrypoints/openai/test_conversation_cache.py
+new file mode 100644
+index 0000000..9404a6c
+--- /dev/null
++++ b/tests/entrypoints/openai/test_conversation_cache.py
+@@ -0,0 +1,666 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++import pytest
++import torch
++
++from vllm.entrypoints.openai.conversation_cache import ConversationFrontendCache
++from vllm.sampling_params import SamplingParams
++from vllm.v1.core.conversation_cache import (
++    ConversationBlockCopy,
++    ConversationEngineCache,
++    ConversationMambaTerminalCapture,
++)
++from vllm.v1.core.kv_cache_manager import KVCacheManager
++from vllm.v1.core.sched.output import SchedulerOutput
++from vllm.v1.kv_cache_interface import (
++    FullAttentionSpec,
++    KVCacheConfig,
++    KVCacheGroupSpec,
++    MambaSpec,
++)
++from vllm.v1.request import Request, RequestStatus
++
++
++@pytest.mark.asyncio
++async def test_conversation_frontend_cache_busy_and_publish():
++    cache = ConversationFrontendCache()
++
++    lease = await cache.try_acquire(
++        model="model",
++        cache_salt=None,
++        conversation_id="conv",
++        generation_id="gen-1",
++    )
++    assert lease is not None
++
++    busy = await cache.try_acquire(
++        model="model",
++        cache_salt=None,
++        conversation_id="conv",
++        generation_id="gen-2",
++    )
++    assert busy is None
++
++    await cache.publish(
++        lease,
++        assistant_text="hello",
++        committed_messages=[
++            {"role": "user", "content": "hi"},
++            {"role": "assistant", "content": "hello"},
++        ],
++        committed_prompt_token_ids=[1, 2, 3],
++    )
++
++    entry = cache.get_entry(model="model", cache_salt=None, conversation_id="conv")
++    assert entry is not None
++    assert entry.committed_message_count == 2
++    assert entry.committed_messages == (
++        {"role": "user", "content": "hi"},
++        {"role": "assistant", "content": "hello"},
++    )
++    assert entry.committed_prompt_token_ids == (1, 2, 3)
++    assert entry.committed_text == "hello"
++    assert entry.completed_generations == 1
++
++    lease_2 = await cache.try_acquire(
++        model="model",
++        cache_salt=None,
++        conversation_id="conv",
++        generation_id="gen-2",
++    )
++    assert lease_2 is not None
++    assert lease_2.committed_message_count == 2
++    assert lease_2.committed_messages == entry.committed_messages
++    assert lease_2.committed_prompt_token_ids == (1, 2, 3)
++    await cache.discard(lease_2)
++
++
++def test_conversation_engine_cache_publish_discard_delete_and_ttl():
++    cache = ConversationEngineCache(pending_ttl_seconds=5.0)
++
++    staged = cache.stage(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-1",
++        token_ids=[1, 2, 3],
++        prompt_token_ids=[1, 2],
++        output_token_ids=[3],
++        finish_reason="stop",
++        stop_reason=None,
++        now=10.0,
++    )
++    assert staged is not None
++    assert staged.token_count == 3
++    assert staged.completed_generations == 0
++
++    assert not cache.stage(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-busy",
++        token_ids=[1],
++        prompt_token_ids=[1],
++        output_token_ids=[],
++        finish_reason="stop",
++        stop_reason=None,
++        now=11.0,
++    )
++    assert cache.touch_pending(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-1",
++        now=12.0,
++    )
++    assert cache.publish(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-1",
++        now=13.0,
++    )
++
++    committed = cache.get_committed(conversation_id="conv", cache_salt=None)
++    assert committed is not None
++    assert committed.generation_id == "gen-1"
++    assert committed.completed_generations == 1
++
++    staged_2 = cache.stage(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-2",
++        token_ids=[1, 2, 3, 4],
++        prompt_token_ids=[1, 2, 3],
++        output_token_ids=[4],
++        finish_reason="length",
++        stop_reason=None,
++        now=14.0,
++    )
++    assert staged_2 is not None
++    assert staged_2.completed_generations == 1
++    assert cache.discard_pending(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-2",
++        now=15.0,
++    )
++    assert cache.get_committed(conversation_id="conv", cache_salt=None) is committed
++
++    assert cache.delete(conversation_id="conv", cache_salt=None, now=16.0)
++    assert cache.get_committed(conversation_id="conv", cache_salt=None) is None
++
++    assert cache.stage(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-expire",
++        token_ids=[1],
++        prompt_token_ids=[1],
++        output_token_ids=[],
++        finish_reason="stop",
++        stop_reason=None,
++        now=20.0,
++    )
++    assert cache.expire_pending(now=26.0) == 1
++    assert cache.get_pending(conversation_id="conv", cache_salt=None) is None
++
++
++def test_conversation_engine_cache_release_candidates():
++    cache = ConversationEngineCache(pending_ttl_seconds=5.0)
++    refs_1 = (("block-a",),)
++    refs_2 = (("block-b",),)
++    refs_3 = (("block-c",),)
++
++    first = cache.stage(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-1",
++        token_ids=[1],
++        prompt_token_ids=[1],
++        output_token_ids=[],
++        finish_reason="stop",
++        stop_reason=None,
++        block_refs_by_group=refs_1,
++        now=10.0,
++    )
++    assert first is not None
++    publish_1 = cache.publish_with_released(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-1",
++        now=11.0,
++    )
++    assert publish_1.ok
++    assert publish_1.release_states == ()
++
++    second = cache.stage(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-2",
++        token_ids=[1, 2],
++        prompt_token_ids=[1],
++        output_token_ids=[2],
++        finish_reason="stop",
++        stop_reason=None,
++        block_refs_by_group=refs_2,
++        now=12.0,
++    )
++    assert second is not None
++    publish_2 = cache.publish_with_released(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-2",
++        now=13.0,
++    )
++    assert publish_2.ok
++    assert publish_2.release_states == (first,)
++
++    third = cache.stage(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-3",
++        token_ids=[1, 2, 3],
++        prompt_token_ids=[1],
++        output_token_ids=[2, 3],
++        finish_reason="stop",
++        stop_reason=None,
++        block_refs_by_group=refs_3,
++        now=14.0,
++    )
++    assert third is not None
++    discard = cache.discard_pending_with_released(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-3",
++        now=15.0,
++    )
++    assert discard.ok
++    assert discard.release_states == (third,)
++
++    delete = cache.delete_with_released(
++        conversation_id="conv",
++        cache_salt=None,
++        now=16.0,
++    )
++    assert delete.ok
++    assert delete.release_states == (second,)
++
++    expired = cache.stage(
++        conversation_id="conv",
++        cache_salt=None,
++        generation_id="gen-expire",
++        token_ids=[4],
++        prompt_token_ids=[4],
++        output_token_ids=[],
++        finish_reason="stop",
++        stop_reason=None,
++        block_refs_by_group=refs_1,
++        now=20.0,
++    )
++    assert expired is not None
++    expiration = cache.expire_pending_with_released(now=26.0)
++    assert expiration.ok
++    assert expiration.release_states == (expired,)
++
++
++def test_conversation_full_attention_block_ref_helpers():
++    spec = FullAttentionSpec(
++        block_size=4,
++        num_kv_heads=1,
++        head_size=8,
++        dtype=torch.float16,
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=8,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-1",
++        prompt_token_ids=[1, 2, 3, 4, 5],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++
++    refs = manager.get_block_refs_by_group(request.request_id)
++    assert len(refs) == 1
++    assert [block.block_id for block in refs[0]] == [1, 2]
++    assert [block.ref_cnt for block in refs[0]] == [1, 1]
++
++    forgotten = manager.forget_request_blocks(request.request_id)
++    assert forgotten == refs
++    assert manager.get_blocks(request.request_id).blocks[0] == ()
++    assert [block.ref_cnt for block in refs[0]] == [1, 1]
++
++    request_2 = Request(
++        request_id="req-2",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    attached = manager.attach_existing_blocks(request_2.request_id, refs)
++    assert attached.get_block_ids() == ([1, 2],)
++    assert [block.ref_cnt for block in refs[0]] == [2, 2]
++
++    manager.release_block_refs_by_group(refs)
++    assert [block.ref_cnt for block in refs[0]] == [1, 1]
++
++    request_2.status = RequestStatus.FINISHED_STOPPED
++    manager.free(request_2)
++    assert [block.ref_cnt for block in refs[0]] == [0, 0]
++
++
++def test_conversation_full_attention_tail_copy_on_write_attach_helper():
++    spec = FullAttentionSpec(
++        block_size=4,
++        num_kv_heads=1,
++        head_size=8,
++        dtype=torch.float16,
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=8,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-cow-1",
++        prompt_token_ids=[1, 2, 3, 4, 5],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    manager.take_new_block_ids()
++    refs = manager.get_block_refs_by_group(request.request_id)
++    assert [block.block_id for block in refs[0]] == [1, 2]
++    assert manager.forget_request_blocks(request.request_id) == refs
++
++    request_2 = Request(
++        request_id="req-cow-2",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    attached, copies = manager.attach_full_attention_blocks_copy_on_write(
++        request_2.request_id,
++        refs,
++        token_count=5,
++    )
++    assert attached.get_block_ids() == ([1, 3],)
++    assert copies == (
++        ConversationBlockCopy(
++            request_id=request_2.request_id,
++            kv_cache_group_id=0,
++            src_block_id=2,
++            dst_block_id=3,
++            kind="full_attention_tail",
++        ),
++    )
++    assert [block.ref_cnt for block in refs[0]] == [2, 1]
++
++    single_manager = manager.coordinator.single_type_managers[0]
++    assert single_manager.num_cached_block[request_2.request_id] == 1
++
++    new_block_ids = manager.take_new_block_ids()
++    assert new_block_ids == [3]
++
++    manager.release_block_refs_by_group(refs)
++    request_2_blocks = manager.get_block_refs_by_group(request_2.request_id)[0]
++    assert [block.block_id for block in request_2_blocks] == [1, 3]
++    assert [block.ref_cnt for block in refs[0]] == [1, 0]
++    assert [block.ref_cnt for block in request_2_blocks] == [1, 1]
++
++    request_2.status = RequestStatus.FINISHED_STOPPED
++    manager.free(request_2)
++    assert [block.ref_cnt for block in request_2_blocks] == [0, 0]
++
++
++def test_conversation_full_attention_aligned_attach_has_no_copy():
++    spec = FullAttentionSpec(
++        block_size=4,
++        num_kv_heads=1,
++        head_size=8,
++        dtype=torch.float16,
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=8,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-aligned-1",
++        prompt_token_ids=[1, 2, 3, 4],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    manager.take_new_block_ids()
++    refs = manager.get_block_refs_by_group(request.request_id)
++    manager.forget_request_blocks(request.request_id)
++
++    request_2 = Request(
++        request_id="req-aligned-2",
++        prompt_token_ids=[1, 2, 3, 4, 5],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    attached, copies = manager.attach_full_attention_blocks_copy_on_write(
++        request_2.request_id,
++        refs,
++        token_count=4,
++    )
++    assert attached.get_block_ids() == ([1],)
++    assert copies == ()
++    assert [block.ref_cnt for block in refs[0]] == [2]
++    assert manager.take_new_block_ids() == []
++
++    manager.release_block_refs_by_group(refs)
++    request_2.status = RequestStatus.FINISHED_STOPPED
++    manager.free(request_2)
++    assert [block.ref_cnt for block in refs[0]] == [0]
++
++
++def test_conversation_mamba_terminal_state_ref_helpers():
++    spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=8,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-mamba-1",
++        prompt_token_ids=[1, 2, 3, 4, 5],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++
++    refs = manager.get_mamba_terminal_state_block_refs(
++        request.request_id,
++        token_count=request.num_tokens,
++    )
++    assert set(refs) == {0}
++    block_index, terminal_block = refs[0]
++    assert block_index == 1
++    assert terminal_block.block_id == 1
++    assert terminal_block.ref_cnt == 1
++
++    forgotten = manager.forget_request_blocks(request.request_id)
++    assert [block.block_id for block in forgotten[0]] == [0, 1]
++    assert terminal_block.ref_cnt == 1
++
++    request_2 = Request(
++        request_id="req-mamba-2",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    attached = manager.attach_mamba_terminal_state_block_refs(
++        request_2.request_id,
++        token_count=request.num_tokens,
++        refs=refs,
++    )
++    assert attached == {0: 1}
++    assert manager.get_blocks(request_2.request_id).get_block_ids() == ([0, 1],)
++    assert terminal_block.ref_cnt == 2
++
++    manager.release_mamba_terminal_state_block_refs(refs)
++    assert terminal_block.ref_cnt == 1
++
++    request_2.status = RequestStatus.FINISHED_STOPPED
++    manager.free(request_2)
++    assert terminal_block.ref_cnt == 0
++
++
++def test_conversation_mamba_terminal_copy_on_write_attach_helper():
++    spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=8,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-mamba-cow-1",
++        prompt_token_ids=[1, 2, 3, 4, 5],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    refs = manager.get_block_refs_by_group(request.request_id)
++    mamba_refs = manager.get_mamba_terminal_state_block_refs(
++        request.request_id,
++        token_count=request.num_tokens,
++    )
++    assert set(mamba_refs) == {0}
++    _block_index, terminal_block = mamba_refs[0]
++    assert terminal_block.ref_cnt == 1
++    manager.forget_request_blocks(request.request_id)
++
++    request_2 = Request(
++        request_id="req-mamba-cow-2",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    attached, copies = manager.attach_conversation_blocks_copy_on_write(
++        request_2.request_id,
++        refs,
++        token_count=5,
++        mamba_terminal_refs=mamba_refs,
++    )
++    assert len(copies) == 1
++    assert copies[0].kind == "mamba_terminal"
++    assert copies[0].src_block_id == terminal_block.block_id
++    assert copies[0].dst_block_id != terminal_block.block_id
++    assert attached.get_block_ids()[0][-1] == copies[0].dst_block_id
++    assert terminal_block.ref_cnt == 1
++
++    manager.release_block_refs_by_group(refs)
++    assert terminal_block.ref_cnt == 0
++    request_2_blocks = manager.get_block_refs_by_group(request_2.request_id)[0]
++    request_2.status = RequestStatus.FINISHED_STOPPED
++    manager.free(request_2)
++    assert all(block.is_null or block.ref_cnt == 0 for block in request_2_blocks)
++
++
++def test_conversation_hybrid_copy_on_write_attach_helper():
++    full_spec = FullAttentionSpec(
++        block_size=4,
++        num_kv_heads=1,
++        head_size=8,
++        dtype=torch.float16,
++    )
++    mamba_spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=16,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=full_spec),
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=mamba_spec),
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-hybrid-cow-1",
++        prompt_token_ids=[1, 2, 3, 4, 5],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    manager.take_new_block_ids()
++    refs = manager.get_block_refs_by_group(request.request_id)
++    mamba_refs = manager.get_mamba_terminal_state_block_refs(
++        request.request_id,
++        token_count=request.num_tokens,
++    )
++    manager.forget_request_blocks(request.request_id)
++
++    request_2 = Request(
++        request_id="req-hybrid-cow-2",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    attached, copies = manager.attach_conversation_blocks_copy_on_write(
++        request_2.request_id,
++        refs,
++        token_count=5,
++        mamba_terminal_refs=mamba_refs,
++    )
++    kinds = {copy.kind for copy in copies}
++    assert kinds == {"full_attention_tail", "mamba_terminal"}
++    assert len(copies) == 2
++    assert attached.get_block_ids()[0][0] == refs[0][0].block_id
++    assert attached.get_block_ids()[0][1] != refs[0][1].block_id
++    assert attached.get_block_ids()[1][-1] != mamba_refs[1][1].block_id
++
++    manager.release_block_refs_by_group(refs)
++    request_2_blocks = manager.get_block_refs_by_group(request_2.request_id)
++    request_2.status = RequestStatus.FINISHED_STOPPED
++    manager.free(request_2)
++    for group_blocks in request_2_blocks:
++        assert all(block.is_null or block.ref_cnt == 0 for block in group_blocks)
++
++
++def test_conversation_mamba_terminal_capture_scheduler_output_field():
++    output = SchedulerOutput.make_empty()
++    assert output.conversation_block_copies is None
++    assert output.conversation_mamba_terminal_captures is None
++
++    output.conversation_block_copies = [
++        ConversationBlockCopy(
++            request_id="req",
++            kv_cache_group_id=0,
++            src_block_id=1,
++            dst_block_id=2,
++            kind="full_attention_tail",
++        )
++    ]
++    assert output.conversation_block_copies[0].dst_block_id == 2
++
++    capture = ConversationMambaTerminalCapture(
++        request_id="req",
++        kv_cache_group_id=3,
++        src_block_index=2,
++        dst_block_index=5,
++        accept_token_bias=0,
++    )
++    output.conversation_mamba_terminal_captures = [capture]
++    assert output.conversation_mamba_terminal_captures[0].dst_block_index == 5
+diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
+index 50013a0..04137da 100644
+--- a/vllm/engine/protocol.py
++++ b/vllm/engine/protocol.py
+@@ -145,6 +145,45 @@ class EngineClient(ABC):
+         """Reset the prefix cache and optionally any configured connector cache"""
+         ...
+ 
++    @abstractmethod
++    async def publish_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        """Publish a pending exact conversation cache state."""
++        ...
++
++    @abstractmethod
++    async def discard_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        """Discard a pending exact conversation cache state."""
++        ...
++
++    @abstractmethod
++    async def touch_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        """Refresh the TTL on a pending exact conversation cache state."""
++        ...
++
++    @abstractmethod
++    async def delete_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        """Delete a committed exact conversation cache state."""
++        ...
++
+     @abstractmethod
+     async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
+         """Sleep the engine"""
+diff --git a/vllm/entrypoints/openai/chat_completion/api_router.py b/vllm/entrypoints/openai/chat_completion/api_router.py
+index cdaaa27..56d4256 100644
+--- a/vllm/entrypoints/openai/chat_completion/api_router.py
++++ b/vllm/entrypoints/openai/chat_completion/api_router.py
+@@ -6,6 +6,7 @@ from http import HTTPStatus
+ 
+ from fastapi import APIRouter, Depends, FastAPI, Request
+ from fastapi.responses import JSONResponse, StreamingResponse
++from starlette.background import BackgroundTask
+ 
+ from vllm.entrypoints.openai.chat_completion.batch_serving import OpenAIServingChatBatch
+ from vllm.entrypoints.openai.chat_completion.protocol import (
+@@ -14,6 +15,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
+     ChatCompletionResponse,
+ )
+ from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
++from vllm.entrypoints.openai.conversation_cache import ConversationStreamingResult
+ from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+ from vllm.entrypoints.openai.orca_metrics import metrics_header
+ from vllm.entrypoints.openai.utils import validate_json_request
+@@ -70,6 +72,15 @@ async def create_chat_completion(request: ChatCompletionRequest, raw_request: Re
+             content=generator.model_dump(),
+             headers=metrics_header(metrics_header_format),
+         )
++    elif isinstance(generator, ConversationStreamingResult):
++        async def close_conversation_stream() -> None:
++            await generator.on_close()
++
++        return StreamingResponse(
++            content=generator.content,
++            media_type="text/event-stream",
++            background=BackgroundTask(close_conversation_stream),
++        )
+ 
+     return StreamingResponse(content=generator, media_type="text/event-stream")
+ 
+diff --git a/vllm/entrypoints/openai/chat_completion/protocol.py b/vllm/entrypoints/openai/chat_completion/protocol.py
+index aacac38..07b7ba4 100644
+--- a/vllm/entrypoints/openai/chat_completion/protocol.py
++++ b/vllm/entrypoints/openai/chat_completion/protocol.py
+@@ -332,6 +332,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
+         ),
+     )
+ 
++    conversation_id: str | None = Field(
++        default=None,
++        description=(
++            "If specified, identifies an append-only conversation whose complete "
++            "turn-boundary state may be reused by a vLLM conversation cache."
++        ),
++    )
++
+     kv_transfer_params: dict[str, Any] | None = Field(
+         default=None,
+         description="KVTransfer parameters used for disaggregated serving.",
+@@ -530,7 +538,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
+                     else replace(self.structured_outputs, **structured_outputs_kwargs)
+                 )
+ 
+-        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
++        extra_args: dict[str, Any] = dict(self.vllm_xargs) if self.vllm_xargs else {}
++        if self.conversation_id:
++            extra_args["conversation_id"] = self.conversation_id
+         if self.kv_transfer_params:
+             # Pass in kv_transfer_params via extra_args
+             extra_args["kv_transfer_params"] = self.kv_transfer_params
+@@ -776,6 +786,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
+             )
+         return data
+ 
++    @model_validator(mode="before")
++    @classmethod
++    def check_conversation_id_support(cls, data):
++        if data.get("conversation_id") is not None and (
++            not isinstance(data["conversation_id"], str)
++            or not data["conversation_id"]
++        ):
++            raise ValueError(
++                "Parameter 'conversation_id' must be a non-empty string if provided."
++            )
++        return data
++
+     @model_validator(mode="before")
+     @classmethod
+     def check_system_message_content_type(cls, data):
+diff --git a/vllm/entrypoints/openai/chat_completion/serving.py b/vllm/entrypoints/openai/chat_completion/serving.py
+index 12dc2cd..e25eda6 100644
+--- a/vllm/entrypoints/openai/chat_completion/serving.py
++++ b/vllm/entrypoints/openai/chat_completion/serving.py
+@@ -2,12 +2,13 @@
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+ 
+ import asyncio
++import copy
+ import json
+ import time
+ from collections.abc import AsyncGenerator, AsyncIterator
+ from collections.abc import Sequence as GenericSequence
+ from http import HTTPStatus
+-from typing import TYPE_CHECKING, Any, Final
++from typing import TYPE_CHECKING, Any, Final, cast
+ 
+ import partial_json_parser
+ import regex as re
+@@ -39,6 +40,11 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
+     TokenState,
+     extract_harmony_streaming_delta,
+ )
++from vllm.entrypoints.openai.conversation_cache import (
++    ConversationFrontendCache,
++    ConversationFrontendLease,
++    ConversationStreamingResult,
++)
+ from vllm.entrypoints.openai.engine.protocol import (
+     DeltaFunctionCall,
+     DeltaMessage,
+@@ -63,7 +69,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
+ )
+ from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
+ from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+-from vllm.inputs import EngineInput
++from vllm.inputs import EngineInput, MultiModalInput, tokens_input
+ from vllm.logger import init_logger
+ from vllm.logprobs import Logprob
+ from vllm.outputs import CompletionOutput, RequestOutput
+@@ -177,6 +183,7 @@ class OpenAIServingChat(OpenAIServing):
+         # Please use the Responses API instead.
+         self.supports_code_interpreter = False
+         self.python_tool = None
++        self.conversation_cache = ConversationFrontendCache()
+ 
+     def warmup(self) -> None:
+         self.renderer.warmup(
+@@ -230,7 +237,12 @@ class OpenAIServingChat(OpenAIServing):
+         self,
+         request: ChatCompletionRequest,
+         raw_request: Request | None = None,
+-    ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
++    ) -> (
++        AsyncGenerator[str, None]
++        | ConversationStreamingResult
++        | ChatCompletionResponse
++        | ErrorResponse
++    ):
+         """
+         Chat Completion API similar to OpenAI's API.
+ 
+@@ -239,6 +251,10 @@ class OpenAIServingChat(OpenAIServing):
+         Chat Completion API.
+         """
+         # Streaming response
++        conversation_error = self._validate_conversation_cache_request(request)
++        if conversation_error is not None:
++            return conversation_error
++
+         tokenizer = self.renderer.tokenizer
+         assert tokenizer is not None
+         chat_template_kwargs = self._effective_chat_template_kwargs(request)
+@@ -248,11 +264,6 @@ class OpenAIServingChat(OpenAIServing):
+                 tokenizer,
+                 chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
+             )
+-        result = await self.render_chat_request(request)
+-        if isinstance(result, ErrorResponse):
+-            return result
+-
+-        conversation, engine_inputs = result
+ 
+         request_id = (
+             f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+@@ -262,101 +273,181 @@ class OpenAIServingChat(OpenAIServing):
+         if raw_request:
+             raw_request.state.request_metadata = request_metadata
+ 
+-        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
++        error_check_ret = await self._check_model(request)
++        if error_check_ret is not None:
++            logger.error("Error with model %s", error_check_ret)
++            return error_check_ret
+ 
+-        model_name = self.models.model_name(lora_request)
++        if self.engine_client.errored:
++            raise self.engine_client.dead_error
+ 
+-        # Extract data_parallel_rank from header (router can inject it)
+-        data_parallel_rank = self._get_data_parallel_rank(raw_request)
++        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
++        conversation_model_key = request.model or self.models.model_name(lora_request)
++        conversation_lease = await self._try_acquire_conversation_lease(
++            request, conversation_model_key, request_id
++        )
++        if isinstance(conversation_lease, ErrorResponse):
++            return conversation_lease
++
++        render_request = request
++        conversation_suffix_messages = copy.deepcopy(request.messages)
++        if conversation_lease is not None:
++            render_request, conversation_suffix_messages = (
++                self._prepare_conversation_render_request(request, conversation_lease)
++            )
+ 
+-        # Schedule the request and get the result generator.
+-        max_model_len = self.model_config.max_model_len
+-        generators: list[AsyncGenerator[RequestOutput, None]] = []
+-        for i, engine_input in enumerate(engine_inputs):
+-            prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
++        try:
++            result = await self.render_chat_request(render_request)
++        except Exception:
++            if conversation_lease is not None:
++                await self._discard_conversation_lease(conversation_lease)
++            raise
++        if isinstance(result, ErrorResponse):
++            if conversation_lease is not None:
++                await self._discard_conversation_lease(conversation_lease)
++            return result
+ 
+-            # If we are creating sub requests for multiple prompts, ensure that they
+-            # have unique request ids.
+-            sub_request_id = (
+-                request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
+-            )
++        conversation, engine_inputs = result
+ 
+-            max_tokens = get_max_tokens(
+-                max_model_len,
+-                request.max_completion_tokens
+-                if request.max_completion_tokens is not None
+-                else request.max_tokens,
+-                self._extract_prompt_len(engine_input),
+-                self.default_sampling_params,
+-                self.override_max_tokens,
++        if conversation_lease is not None:
++            mm_error = self._filter_conversation_prefix_mm_inputs(
++                engine_inputs,
++                conversation_lease,
+             )
++            if mm_error is not None:
++                await self._discard_conversation_lease(conversation_lease)
++                return mm_error
+ 
+-            sampling_params: SamplingParams | BeamSearchParams
+-            if request.use_beam_search:
+-                sampling_params = request.to_beam_search_params(
+-                    max_tokens, self.default_sampling_params
+-                )
+-            else:
+-                sampling_params = request.to_sampling_params(
+-                    max_tokens,
+-                    self.default_sampling_params,
+-                )
++        lora_request = self._maybe_get_adapters(
++            render_request, supports_default_mm_loras=True
++        )
++        model_name = self.models.model_name(lora_request)
++        conversation_prompt_token_ids = self._conversation_prompt_token_ids(
++            engine_inputs
++        )
+ 
+-            self._log_inputs(
+-                sub_request_id,
+-                engine_input,
+-                params=sampling_params,
+-                lora_request=lora_request,
+-            )
++        # Extract data_parallel_rank from header (router can inject it)
++        data_parallel_rank = self._get_data_parallel_rank(raw_request)
+ 
+-            trace_headers = (
+-                None
+-                if raw_request is None
+-                else await self._get_trace_headers(raw_request.headers)
+-            )
++        try:
++            # Schedule the request and get the result generator.
++            max_model_len = self.model_config.max_model_len
++            generators: list[AsyncGenerator[RequestOutput, None]] = []
++            for i, engine_input in enumerate(engine_inputs):
++                prompt_token_ids = self._extract_prompt_components(engine_input).token_ids
++
++                # If we are creating sub requests for multiple prompts, ensure that they
++                # have unique request ids.
++                sub_request_id = (
++                    request_id if len(engine_inputs) == 1 else f"{request_id}_{i}"
++                )
+ 
+-            if isinstance(sampling_params, BeamSearchParams):
+-                generator = self.beam_search(
+-                    prompt=engine_input,
+-                    request_id=sub_request_id,
+-                    params=sampling_params,
+-                    lora_request=lora_request,
+-                    trace_headers=trace_headers,
++                max_tokens = get_max_tokens(
++                    max_model_len,
++                    render_request.max_completion_tokens
++                    if render_request.max_completion_tokens is not None
++                    else render_request.max_tokens,
++                    self._extract_prompt_len(engine_input),
++                    self.default_sampling_params,
++                    self.override_max_tokens,
+                 )
+-            else:
+-                if not request.include_reasoning:
+-                    reasoning_ended = True
+-                elif request._grammar_from_tool_parser:
+-                    # The Mistral grammar already includes an optional
+-                    # `think?` rule that handles both reasoning and
+-                    # non-reasoning outputs.
+-                    reasoning_ended = True
+-                elif reasoning_parser:
+-                    reasoning_ended = reasoning_parser.is_reasoning_end(
+-                        prompt_token_ids or []
++
++                sampling_params: SamplingParams | BeamSearchParams
++                if render_request.use_beam_search:
++                    sampling_params = render_request.to_beam_search_params(
++                        max_tokens, self.default_sampling_params
+                     )
+                 else:
+-                    reasoning_ended = None
++                    sampling_params = render_request.to_sampling_params(
++                        max_tokens,
++                        self.default_sampling_params,
++                    )
++                    if conversation_lease is not None:
++                        self._set_conversation_sampling_args(
++                            sampling_params,
++                            conversation_lease,
++                        )
+ 
+-                generator = self.engine_client.generate(
+-                    engine_input,
+-                    sampling_params,
++                self._log_inputs(
+                     sub_request_id,
++                    engine_input,
++                    params=sampling_params,
+                     lora_request=lora_request,
+-                    trace_headers=trace_headers,
+-                    priority=request.priority,
+-                    data_parallel_rank=data_parallel_rank,
+-                    reasoning_ended=reasoning_ended,
+                 )
+ 
+-            generators.append(generator)
++                trace_headers = (
++                    None
++                    if raw_request is None
++                    else await self._get_trace_headers(raw_request.headers)
++                )
+ 
+-        assert len(generators) == 1
+-        (result_generator,) = generators
++                if isinstance(sampling_params, BeamSearchParams):
++                    generator = self.beam_search(
++                        prompt=engine_input,
++                        request_id=sub_request_id,
++                        params=sampling_params,
++                        lora_request=lora_request,
++                        trace_headers=trace_headers,
++                    )
++                else:
++                    if not render_request.include_reasoning:
++                        reasoning_ended = True
++                    elif render_request._grammar_from_tool_parser:
++                        # The Mistral grammar already includes an optional
++                        # `think?` rule that handles both reasoning and
++                        # non-reasoning outputs.
++                        reasoning_ended = True
++                    elif reasoning_parser:
++                        reasoning_ended = reasoning_parser.is_reasoning_end(
++                            prompt_token_ids or []
++                        )
++                    else:
++                        reasoning_ended = None
++
++                    generator = self.engine_client.generate(
++                        engine_input,
++                        sampling_params,
++                        sub_request_id,
++                        lora_request=lora_request,
++                        trace_headers=trace_headers,
++                        priority=render_request.priority,
++                        data_parallel_rank=data_parallel_rank,
++                        reasoning_ended=reasoning_ended,
++                    )
++
++                generators.append(generator)
++
++            assert len(generators) == 1
++            (result_generator,) = generators
++
++            if render_request.stream:
++                stream_generator = self.chat_completion_stream_generator(
++                    render_request,
++                    result_generator,
++                    request_id,
++                    model_name,
++                    conversation,
++                    tokenizer,
++                    request_metadata,
++                    reasoning_parser,
++                    chat_template_kwargs=chat_template_kwargs,
++                )
++                if conversation_lease is None:
++                    return stream_generator
++                return ConversationStreamingResult(
++                    content=self._conversation_stream_wrapper(
++                        stream_generator,
++                        lease=conversation_lease,
++                        suffix_messages=conversation_suffix_messages,
++                        prompt_token_ids=conversation_prompt_token_ids,
++                    ),
++                    on_close=lambda: self._discard_conversation_lease(
++                        conversation_lease
++                    ),
++                )
+ 
+-        if request.stream:
+-            return self.chat_completion_stream_generator(
+-                request,
++            response = await self.chat_completion_full_generator(
++                render_request,
+                 result_generator,
+                 request_id,
+                 model_name,
+@@ -364,19 +455,394 @@ class OpenAIServingChat(OpenAIServing):
+                 tokenizer,
+                 request_metadata,
+                 reasoning_parser,
+-                chat_template_kwargs=chat_template_kwargs,
+             )
++            if conversation_lease is not None:
++                if isinstance(response, ErrorResponse):
++                    await self._discard_conversation_lease(conversation_lease)
++                else:
++                    await self._publish_full_conversation_response(
++                        conversation_lease,
++                        response,
++                        suffix_messages=conversation_suffix_messages,
++                        prompt_token_ids=conversation_prompt_token_ids,
++                    )
++            return response
++        except Exception:
++            if conversation_lease is not None:
++                await self._discard_conversation_lease(conversation_lease)
++            raise
++
++    def _validate_conversation_cache_request(
++        self, request: ChatCompletionRequest
++    ) -> ErrorResponse | None:
++        if not request.conversation_id:
++            return None
++        if request.n not in (None, 1):
++            return self.create_error_response(
++                "conversation_id only supports n=1 in this implementation."
++            )
++        if request.use_beam_search:
++            return self.create_error_response(
++                "conversation_id does not support beam search in this implementation."
++            )
++        if request.continue_final_message:
++            return self.create_error_response(
++                "conversation_id does not support continue_final_message."
++            )
++        if not request.add_generation_prompt:
++            return self.create_error_response(
++                "conversation_id requires add_generation_prompt=true."
++            )
++        return None
++
++    def _prepare_conversation_render_request(
++        self,
++        request: ChatCompletionRequest,
++        lease: ConversationFrontendLease,
++    ) -> tuple[ChatCompletionRequest, list[Any]]:
++        suffix_messages = self._conversation_suffix_messages(request, lease)
++        if not lease.committed_messages:
++            return request, suffix_messages
++
++        render_messages = [
++            *copy.deepcopy(list(lease.committed_messages)),
++            *copy.deepcopy(suffix_messages),
++        ]
++        render_request = request.model_copy(update={"messages": render_messages})
++        logger.debug(
++            "Rendering conversation %s with %d committed messages and %d suffix "
++            "messages.",
++            lease.key.conversation_id,
++            len(lease.committed_messages),
++            len(suffix_messages),
++        )
++        return render_request, suffix_messages
++
++    def _conversation_suffix_messages(
++        self,
++        request: ChatCompletionRequest,
++        lease: ConversationFrontendLease,
++    ) -> list[Any]:
++        committed_count = lease.committed_message_count
++        if committed_count <= 0 or not lease.committed_messages:
++            return copy.deepcopy(request.messages)
++        if len(request.messages) > committed_count and self._looks_like_full_history(
++            request.messages,
++            lease.committed_messages,
++            committed_count,
++        ):
++            return copy.deepcopy(request.messages[committed_count:])
++        return copy.deepcopy(request.messages)
++
++    @staticmethod
++    def _looks_like_full_history(
++        messages: GenericSequence[Any],
++        committed_messages: GenericSequence[Any],
++        committed_count: int,
++    ) -> bool:
++        if len(committed_messages) < committed_count:
++            return False
++        for index in range(committed_count):
++            if OpenAIServingChat._message_role(messages[index]) != (
++                OpenAIServingChat._message_role(committed_messages[index])
++            ):
++                return False
++        return True
++
++    @staticmethod
++    def _message_role(message: Any) -> Any:
++        if isinstance(message, dict):
++            return message.get("role")
++        return getattr(message, "role", None)
++
++    def _filter_conversation_prefix_mm_inputs(
++        self,
++        engine_inputs: list[EngineInput],
++        lease: ConversationFrontendLease,
++    ) -> ErrorResponse | None:
++        if not lease.committed_prompt_token_ids:
++            return None
++
++        boundary = len(lease.committed_prompt_token_ids)
++        for index, engine_input in enumerate(engine_inputs):
++            filtered = self._filter_conversation_prefix_mm_input(
++                engine_input,
++                boundary,
++                conversation_id=lease.key.conversation_id,
++            )
++            if isinstance(filtered, ErrorResponse):
++                return filtered
++            engine_inputs[index] = filtered
++        return None
++
++    def _filter_conversation_prefix_mm_input(
++        self,
++        engine_input: EngineInput,
++        boundary: int,
++        *,
++        conversation_id: str,
++    ) -> EngineInput | ErrorResponse:
++        if engine_input.get("type") != "multimodal":
++            return engine_input
++
++        mm_engine_input = cast(MultiModalInput, engine_input)
++        mm_hashes = mm_engine_input["mm_hashes"]
++        mm_placeholders = mm_engine_input["mm_placeholders"]
++        mm_kwargs = mm_engine_input["mm_kwargs"]
++
++        kept_hashes: dict[str, list[str]] = {}
++        kept_placeholders: dict[str, list[Any]] = {}
++        kept_kwargs_data: dict[str, list[Any]] = {}
++        kept = 0
++        removed = 0
++
++        for modality, placeholders in mm_placeholders.items():
++            hashes = list(mm_hashes.get(modality, []))
++            kwargs_items = list(mm_kwargs.get(modality, []))
++            if len(hashes) != len(placeholders) or len(kwargs_items) != len(
++                placeholders
++            ):
++                return self.create_error_response(
++                    "conversation_id multimodal metadata is inconsistent for "
++                    f"{conversation_id!r}: modality={modality!r} placeholders="
++                    f"{len(placeholders)} hashes={len(hashes)} kwargs="
++                    f"{len(kwargs_items)}",
++                    param="messages",
++                )
++            modality_keep_indexes: list[int] = []
++            for item_index, placeholder in enumerate(placeholders):
++                start = placeholder.offset
++                end = placeholder.offset + placeholder.length
++                if end <= boundary:
++                    removed += 1
++                    continue
++                if start >= boundary:
++                    modality_keep_indexes.append(item_index)
++                    kept += 1
++                    continue
++                return self.create_error_response(
++                    "conversation_id cached multimodal placeholder spans the "
++                    f"committed prefix boundary for {conversation_id!r}: "
++                    f"modality={modality!r} offset={start} length="
++                    f"{placeholder.length} boundary={boundary}",
++                    param="messages",
++                )
++
++            if modality_keep_indexes:
++                kept_placeholders[modality] = [
++                    placeholders[item_index] for item_index in modality_keep_indexes
++                ]
++                kept_hashes[modality] = [
++                    hashes[item_index]
++                    for item_index in modality_keep_indexes
++                    if item_index < len(hashes)
++                ]
++                kept_kwargs_data[modality] = [
++                    kwargs_items[item_index]
++                    for item_index in modality_keep_indexes
++                    if item_index < len(kwargs_items)
++                ]
++
++        if removed == 0:
++            return engine_input
++
++        logger.debug(
++            "Filtered %d cached multimodal feature(s) for conversation %s; "
++            "kept %d suffix feature(s).",
++            removed,
++            conversation_id,
++            kept,
++        )
++        if kept == 0:
++            token_input = tokens_input(
++                list(mm_engine_input["prompt_token_ids"]),
++                prompt=mm_engine_input.get("prompt"),
++                cache_salt=mm_engine_input.get("cache_salt"),
++                conversation_id=mm_engine_input.get("conversation_id"),
++            )
++            if "arrival_time" in mm_engine_input:
++                token_input["arrival_time"] = mm_engine_input["arrival_time"]
++            return token_input
+ 
+-        return await self.chat_completion_full_generator(
+-            request,
+-            result_generator,
++        filtered_input = dict(mm_engine_input)
++        filtered_input["mm_hashes"] = kept_hashes
++        filtered_input["mm_placeholders"] = kept_placeholders
++        filtered_input["mm_kwargs"] = mm_kwargs.__class__(kept_kwargs_data)
++        return cast(EngineInput, filtered_input)
++
++    def _conversation_prompt_token_ids(
++        self,
++        engine_inputs: list[EngineInput],
++    ) -> tuple[int, ...] | None:
++        if not engine_inputs:
++            return None
++        token_ids = self._extract_prompt_components(engine_inputs[0]).token_ids
++        if token_ids is None:
++            return None
++        return tuple(token_ids)
++
++    async def _try_acquire_conversation_lease(
++        self,
++        request: ChatCompletionRequest,
++        model_name: str,
++        request_id: str,
++    ) -> ConversationFrontendLease | ErrorResponse | None:
++        if not request.conversation_id:
++            return None
++
++        lease = await self.conversation_cache.try_acquire(
++            model=model_name,
++            cache_salt=request.cache_salt,
++            conversation_id=request.conversation_id,
++            generation_id=request_id,
++        )
++        if lease is None:
++            return self.create_error_response(
++                f"Conversation {request.conversation_id!r} is already generating.",
++                err_type="ConflictError",
++                status_code=HTTPStatus.CONFLICT,
++                param="conversation_id",
++            )
++        logger.debug(
++            "Acquired conversation cache lease for %s request_id=%s",
++            request.conversation_id,
+             request_id,
+-            model_name,
+-            conversation,
+-            tokenizer,
+-            request_metadata,
+-            reasoning_parser,
+         )
++        return lease
++
++    @staticmethod
++    def _set_conversation_sampling_args(
++        sampling_params: SamplingParams,
++        lease: ConversationFrontendLease,
++    ) -> None:
++        extra_args = dict(sampling_params.extra_args or {})
++        extra_args["conversation_id"] = lease.key.conversation_id
++        extra_args["conversation_generation_id"] = lease.generation_id
++        sampling_params.extra_args = extra_args
++
++    async def _publish_full_conversation_response(
++        self,
++        lease: ConversationFrontendLease,
++        response: ChatCompletionResponse,
++        *,
++        suffix_messages: list[Any],
++        prompt_token_ids: tuple[int, ...] | None,
++    ) -> None:
++        assistant_text = ""
++        if response.choices:
++            assistant_text = response.choices[0].message.content or ""
++        await self._publish_conversation_response(
++            lease,
++            assistant_text,
++            suffix_messages=suffix_messages,
++            prompt_token_ids=prompt_token_ids,
++        )
++
++    async def _publish_conversation_response(
++        self,
++        lease: ConversationFrontendLease,
++        assistant_text: str,
++        *,
++        suffix_messages: list[Any],
++        prompt_token_ids: tuple[int, ...] | None,
++    ) -> None:
++        engine_published = await self.engine_client.publish_conversation_cache(
++            lease.key.conversation_id,
++            lease.key.cache_salt,
++            lease.generation_id,
++        )
++        if not engine_published:
++            logger.warning(
++                "Engine conversation cache publish failed for %s generation %s.",
++                lease.key.conversation_id,
++                lease.generation_id,
++            )
++            await self.conversation_cache.discard(lease)
++            return
++        committed_messages = [
++            *copy.deepcopy(list(lease.committed_messages)),
++            *copy.deepcopy(suffix_messages),
++            {"role": "assistant", "content": assistant_text},
++        ]
++        await self.conversation_cache.publish(
++            lease,
++            assistant_text=assistant_text,
++            committed_messages=committed_messages,
++            committed_prompt_token_ids=prompt_token_ids,
++        )
++
++    async def _discard_conversation_lease(
++        self,
++        lease: ConversationFrontendLease,
++    ) -> None:
++        try:
++            await self.engine_client.discard_conversation_cache_pending(
++                lease.key.conversation_id,
++                lease.key.cache_salt,
++                lease.generation_id,
++            )
++        finally:
++            await self.conversation_cache.discard(lease)
++
++    async def _conversation_stream_wrapper(
++        self,
++        stream_generator: AsyncGenerator[str, None],
++        *,
++        lease: ConversationFrontendLease,
++        suffix_messages: list[Any],
++        prompt_token_ids: tuple[int, ...] | None,
++    ) -> AsyncGenerator[str, None]:
++        assistant_text_parts: list[str] = []
++        saw_done = False
++        saw_error = False
++
++        try:
++            async for chunk in stream_generator:
++                text_delta, done, error = self._collect_conversation_stream_delta(chunk)
++                if text_delta:
++                    assistant_text_parts.append(text_delta)
++                saw_done = saw_done or done
++                saw_error = saw_error or error
++                yield chunk
++
++            if saw_done and not saw_error:
++                await self._publish_conversation_response(
++                    lease,
++                    "".join(assistant_text_parts),
++                    suffix_messages=suffix_messages,
++                    prompt_token_ids=prompt_token_ids,
++                )
++            else:
++                await self._discard_conversation_lease(lease)
++        except Exception:
++            await self._discard_conversation_lease(lease)
++            raise
++
++    @staticmethod
++    def _collect_conversation_stream_delta(chunk: str) -> tuple[str, bool, bool]:
++        text_parts: list[str] = []
++        saw_done = False
++        saw_error = False
++        for line in chunk.splitlines():
++            if not line.startswith("data: "):
++                continue
++            data = line[len("data: ") :]
++            if data == "[DONE]":
++                saw_done = True
++                continue
++            try:
++                event = json.loads(data)
++            except json.JSONDecodeError:
++                continue
++            if "error" in event:
++                saw_error = True
++                continue
++            for choice in event.get("choices") or []:
++                delta = choice.get("delta") or {}
++                content = delta.get("content")
++                if content:
++                    text_parts.append(content)
++        return "".join(text_parts), saw_done, saw_error
+ 
+     def get_chat_request_role(self, request: ChatCompletionRequest) -> str:
+         if request.add_generation_prompt:
+diff --git a/vllm/entrypoints/openai/conversation_cache.py b/vllm/entrypoints/openai/conversation_cache.py
+new file mode 100644
+index 0000000..35bee1e
+--- /dev/null
++++ b/vllm/entrypoints/openai/conversation_cache.py
+@@ -0,0 +1,160 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++from __future__ import annotations
++
++import asyncio
++import copy
++import time
++from collections.abc import AsyncGenerator, Awaitable, Callable, Sequence
++from dataclasses import dataclass, field
++from enum import Enum
++from typing import Any
++
++
++class ConversationCacheState(Enum):
++    READY = "ready"
++    GENERATING = "generating"
++    FAILED = "failed"
++
++
++@dataclass(frozen=True)
++class ConversationCacheKey:
++    model: str
++    cache_salt: str
++    conversation_id: str
++
++
++@dataclass
++class ConversationFrontendEntry:
++    key: ConversationCacheKey
++    state: ConversationCacheState = ConversationCacheState.READY
++    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
++    generation_id: str | None = None
++    committed_message_count: int = 0
++    committed_messages: tuple[Any, ...] = ()
++    committed_prompt_token_ids: tuple[int, ...] | None = None
++    committed_text: str = ""
++    created_at: float = field(default_factory=time.time)
++    last_access: float = field(default_factory=time.time)
++    completed_generations: int = 0
++
++
++@dataclass(frozen=True)
++class ConversationFrontendLease:
++    key: ConversationCacheKey
++    generation_id: str
++    committed_message_count: int = 0
++    committed_messages: tuple[Any, ...] = ()
++    committed_prompt_token_ids: tuple[int, ...] | None = None
++
++
++@dataclass(frozen=True)
++class ConversationStreamingResult:
++    content: AsyncGenerator[str, None]
++    on_close: Callable[[], Awaitable[None]]
++
++
++class ConversationFrontendCache:
++    """Process-local OpenAI-layer ledger for exact conversation cache state.
++
++    It provides the request contract, same-id exclusion, and committed turn
++    message ledger used to reconstruct suffix-only append requests before they
++    reach the engine-owned KV/Mamba cache.
++    """
++
++    def __init__(self) -> None:
++        self._entries: dict[ConversationCacheKey, ConversationFrontendEntry] = {}
++        self._guard = asyncio.Lock()
++
++    async def try_acquire(
++        self,
++        *,
++        model: str,
++        cache_salt: str | None,
++        conversation_id: str,
++        generation_id: str,
++    ) -> ConversationFrontendLease | None:
++        key = self._make_key(model, cache_salt, conversation_id)
++        async with self._guard:
++            entry = self._entries.get(key)
++            if entry is None:
++                entry = ConversationFrontendEntry(key=key)
++                self._entries[key] = entry
++
++            if entry.state is not ConversationCacheState.READY or entry.lock.locked():
++                return None
++
++            await entry.lock.acquire()
++            entry.state = ConversationCacheState.GENERATING
++            entry.generation_id = generation_id
++            entry.last_access = time.time()
++            return ConversationFrontendLease(
++                key=key,
++                generation_id=generation_id,
++                committed_message_count=entry.committed_message_count,
++                committed_messages=tuple(copy.deepcopy(entry.committed_messages)),
++                committed_prompt_token_ids=entry.committed_prompt_token_ids,
++            )
++
++    async def publish(
++        self,
++        lease: ConversationFrontendLease,
++        *,
++        assistant_text: str,
++        committed_message_count: int | None = None,
++        committed_messages: Sequence[Any] | None = None,
++        committed_prompt_token_ids: Sequence[int] | None = None,
++    ) -> None:
++        async with self._guard:
++            entry = self._entries.get(lease.key)
++            if entry is None or entry.generation_id != lease.generation_id:
++                return
++
++            if committed_messages is not None:
++                entry.committed_messages = tuple(copy.deepcopy(committed_messages))
++                entry.committed_message_count = len(entry.committed_messages)
++            elif committed_message_count is not None:
++                entry.committed_message_count = committed_message_count
++            if committed_prompt_token_ids is not None:
++                entry.committed_prompt_token_ids = tuple(committed_prompt_token_ids)
++            entry.committed_text = assistant_text
++            entry.completed_generations += 1
++            entry.state = ConversationCacheState.READY
++            entry.generation_id = None
++            entry.last_access = time.time()
++            if entry.lock.locked():
++                entry.lock.release()
++
++    async def discard(self, lease: ConversationFrontendLease) -> None:
++        async with self._guard:
++            entry = self._entries.get(lease.key)
++            if entry is None or entry.generation_id != lease.generation_id:
++                return
++
++            entry.state = ConversationCacheState.READY
++            entry.generation_id = None
++            entry.last_access = time.time()
++            if entry.lock.locked():
++                entry.lock.release()
++
++    def get_entry(
++        self,
++        *,
++        model: str,
++        cache_salt: str | None,
++        conversation_id: str,
++    ) -> ConversationFrontendEntry | None:
++        return self._entries.get(self._make_key(model, cache_salt, conversation_id))
++
++    @staticmethod
++    def _make_key(
++        model: str,
++        cache_salt: str | None,
++        conversation_id: str,
++    ) -> ConversationCacheKey:
++        return ConversationCacheKey(
++            model=model,
++            cache_salt=cache_salt or "",
++            conversation_id=conversation_id,
++        )
+diff --git a/vllm/entrypoints/serve/render/serving.py b/vllm/entrypoints/serve/render/serving.py
+index 32c3351..52ca841 100644
+--- a/vllm/entrypoints/serve/render/serving.py
++++ b/vllm/entrypoints/serve/render/serving.py
+@@ -432,7 +432,11 @@ class OpenAIServingRender:
+ 
+         # Render prompt token ids.
+         prompt_token_ids = render_for_completion(messages)
+-        engine_input = tokens_input(prompt_token_ids, cache_salt=request.cache_salt)
++        engine_input = tokens_input(
++            prompt_token_ids,
++            cache_salt=request.cache_salt,
++            conversation_id=request.conversation_id,
++        )
+ 
+         return messages, [engine_input]
+ 
+@@ -514,7 +518,7 @@ class OpenAIServingRender:
+             tok_params,
+             prompt_extras={
+                 k: v
+-                for k in ("mm_processor_kwargs", "cache_salt")
++                for k in ("mm_processor_kwargs", "cache_salt", "conversation_id")
+                 if (v := getattr(request, k, None)) is not None
+             },
+             skip_mm_cache=skip_mm_cache,
+@@ -560,7 +564,7 @@ class OpenAIServingRender:
+             tok_params,
+             prompt_extras={
+                 k: v
+-                for k in ("mm_processor_kwargs", "cache_salt")
++                for k in ("mm_processor_kwargs", "cache_salt", "conversation_id")
+                 if (v := getattr(request, k, None)) is not None
+             },
+             skip_mm_cache=skip_mm_cache,
+diff --git a/vllm/inputs/engine.py b/vllm/inputs/engine.py
+index 2b426eb..fbff544 100644
+--- a/vllm/inputs/engine.py
++++ b/vllm/inputs/engine.py
+@@ -25,6 +25,9 @@ class _InputOptions(TypedDict):
+     cache_salt: NotRequired[str]
+     """Optional cache salt to be used for prefix caching."""
+ 
++    conversation_id: NotRequired[str]
++    """Optional append-only conversation identifier for exact turn-boundary caching."""
++
+ 
+ class TokensInput(_InputOptions):
+     """Represents token-based input to the engine."""
+@@ -44,6 +47,7 @@ def tokens_input(
+     *,
+     prompt: str | None = None,
+     cache_salt: str | None = None,
++    conversation_id: str | None = None,
+ ) -> TokensInput:
+     """
+     Construct [`TokensInput`][vllm.inputs.engine.TokensInput]
+@@ -55,6 +59,8 @@ def tokens_input(
+         inputs["prompt"] = prompt
+     if cache_salt is not None:
+         inputs["cache_salt"] = cache_salt
++    if conversation_id is not None:
++        inputs["conversation_id"] = conversation_id
+ 
+     return inputs
+ 
+@@ -77,6 +83,7 @@ def embeds_input(
+     *,
+     prompt: str | None = None,
+     cache_salt: str | None = None,
++    conversation_id: str | None = None,
+ ) -> EmbedsInput:
+     """
+     Construct [`EmbedsInput`][vllm.inputs.engine.EmbedsInput]
+@@ -88,6 +95,8 @@ def embeds_input(
+         inputs["prompt"] = prompt
+     if cache_salt is not None:
+         inputs["cache_salt"] = cache_salt
++    if conversation_id is not None:
++        inputs["conversation_id"] = conversation_id
+ 
+     return inputs
+ 
+@@ -137,6 +146,7 @@ def mm_input(
+     *,
+     prompt: str | None = None,
+     cache_salt: str | None = None,
++    conversation_id: str | None = None,
+ ) -> MultiModalInput:
+     inputs = MultiModalInput(
+         type="multimodal",
+@@ -150,6 +160,8 @@ def mm_input(
+         inputs["prompt"] = prompt
+     if cache_salt is not None:
+         inputs["cache_salt"] = cache_salt
++    if conversation_id is not None:
++        inputs["conversation_id"] = conversation_id
+ 
+     return inputs
+ 
+@@ -192,6 +204,8 @@ def mm_enc_dec_input(
+         inputs["encoder_prompt"] = encoder_inputs["prompt"]
+     if "cache_salt" in encoder_inputs:
+         inputs["cache_salt"] = encoder_inputs["cache_salt"]
++    if "conversation_id" in encoder_inputs:
++        inputs["conversation_id"] = encoder_inputs["conversation_id"]
+ 
+     return inputs
+ 
+@@ -335,6 +349,8 @@ def build_enc_dec_input(
+ 
+     if cache_salt := enc_input.get("cache_salt"):
+         dec_input_new["cache_salt"] = cache_salt
++    if conversation_id := enc_input.get("conversation_id"):
++        dec_input_new["conversation_id"] = conversation_id
+ 
+     return EncoderDecoderInput(
+         type="enc_dec",
+diff --git a/vllm/inputs/llm.py b/vllm/inputs/llm.py
+index ff22af8..f675b91 100644
+--- a/vllm/inputs/llm.py
++++ b/vllm/inputs/llm.py
+@@ -95,6 +95,11 @@ class _PromptOptions(TypedDict):
+     Optional cache salt to be used for prefix caching.
+     """
+ 
++    conversation_id: NotRequired[str]
++    """
++    Optional append-only conversation identifier for exact turn-boundary caching.
++    """
++
+ 
+ class TextPrompt(_PromptOptions):
+     """Schema for a text prompt."""
+diff --git a/vllm/inputs/preprocess.py b/vllm/inputs/preprocess.py
+index 7722014..2025543 100644
+--- a/vllm/inputs/preprocess.py
++++ b/vllm/inputs/preprocess.py
+@@ -155,6 +155,8 @@ class InputPreprocessor:
+             inputs["prompt"] = prompt_text
+         if cache_salt := parsed_content.get("cache_salt"):
+             inputs["cache_salt"] = cache_salt
++        if conversation_id := parsed_content.get("conversation_id"):
++            inputs["conversation_id"] = conversation_id
+ 
+         return inputs
+ 
+@@ -184,6 +186,8 @@ class InputPreprocessor:
+ 
+         if cache_salt := parsed_content.get("cache_salt"):
+             inputs["cache_salt"] = cache_salt
++        if conversation_id := parsed_content.get("conversation_id"):
++            inputs["conversation_id"] = conversation_id
+ 
+         return inputs
+ 
+diff --git a/vllm/renderers/base.py b/vllm/renderers/base.py
+index 2f10302..ea3cbe5 100644
+--- a/vllm/renderers/base.py
++++ b/vllm/renderers/base.py
+@@ -740,6 +740,8 @@ class BaseRenderer(ABC, Generic[_T]):
+             engine_input["prompt"] = prompt_text
+         if cache_salt := prompt.get("cache_salt"):
+             engine_input["cache_salt"] = cache_salt
++        if conversation_id := prompt.get("conversation_id"):
++            engine_input["conversation_id"] = conversation_id
+ 
+         return engine_input
+ 
+@@ -769,6 +771,7 @@ class BaseRenderer(ABC, Generic[_T]):
+         return embeds_input(
+             prompt_embeds=prompt_embeds,
+             cache_salt=prompt.get("cache_salt"),
++            conversation_id=prompt.get("conversation_id"),
+         )
+ 
+     async def _process_tokens_async(
+@@ -796,6 +799,8 @@ class BaseRenderer(ABC, Generic[_T]):
+             engine_input["prompt"] = prompt_text
+         if cache_salt := prompt.get("cache_salt"):
+             engine_input["cache_salt"] = cache_salt
++        if conversation_id := prompt.get("conversation_id"):
++            engine_input["conversation_id"] = conversation_id
+ 
+         return engine_input
+ 
+diff --git a/vllm/v1/core/conversation_cache.py b/vllm/v1/core/conversation_cache.py
+new file mode 100644
+index 0000000..281693c
+--- /dev/null
++++ b/vllm/v1/core/conversation_cache.py
+@@ -0,0 +1,350 @@
++# SPDX-License-Identifier: Apache-2.0
++# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++
++from __future__ import annotations
++
++import time
++from dataclasses import dataclass, field
++from typing import TYPE_CHECKING, Any, Literal
++
++if TYPE_CHECKING:
++    from vllm.v1.engine import FinishReason
++    from vllm.v1.request import Request
++
++
++@dataclass(frozen=True)
++class ConversationEngineCacheKey:
++    conversation_id: str
++    cache_salt: str = ""
++
++
++@dataclass(frozen=True)
++class ConversationMambaTerminalStateRef:
++    kv_cache_group_id: int
++    block_index: int
++    block_id: int
++
++
++@dataclass(frozen=True)
++class ConversationMambaTerminalCapture:
++    request_id: str
++    kv_cache_group_id: int
++    src_block_index: int
++    dst_block_index: int
++    accept_token_bias: int
++
++
++@dataclass(frozen=True)
++class ConversationBlockCopy:
++    request_id: str
++    kv_cache_group_id: int
++    src_block_id: int
++    dst_block_id: int
++    kind: Literal["full_attention_tail", "mamba_terminal"]
++
++
++@dataclass
++class ConversationEngineState:
++    """Engine-owned exact conversation ledger.
++
++    This phase intentionally records only token/request metadata. Later phases
++    will add full-attention block ownership and terminal Mamba state locations.
++    """
++
++    key: ConversationEngineCacheKey
++    generation_id: str
++    token_count: int
++    committed_token_ids: tuple[int, ...]
++    prompt_token_ids: tuple[int, ...]
++    output_token_ids: tuple[int, ...]
++    finish_reason: str | None
++    stop_reason: int | str | None
++    block_refs_by_group: tuple[tuple[Any, ...], ...] = ()
++    mamba_terminal_state_refs: tuple[ConversationMambaTerminalStateRef, ...] = ()
++    created_at: float = field(default_factory=time.monotonic)
++    last_access: float = field(default_factory=time.monotonic)
++    completed_generations: int = 0
++
++
++@dataclass
++class PendingConversationEngineState:
++    key: ConversationEngineCacheKey
++    previous_generation_id: str | None
++    pending_generation_id: str
++    old_state: ConversationEngineState | None
++    new_state: ConversationEngineState
++    created_at: float = field(default_factory=time.monotonic)
++    last_access: float = field(default_factory=time.monotonic)
++
++
++@dataclass(frozen=True)
++class ConversationCacheMutation:
++    ok: bool
++    release_states: tuple[ConversationEngineState, ...] = ()
++
++
++class ConversationEngineCache:
++    """Process-local exact conversation cache state for the v1 engine.
++
++    This manager does not use vLLM's block-prefix-cache matching. It is a
++    complete-turn state machine that later code can extend with physical KV and
++    Mamba ownership once copy-on-write attach/capture is implemented.
++    """
++
++    def __init__(self, pending_ttl_seconds: float = 300.0) -> None:
++        self.pending_ttl_seconds = pending_ttl_seconds
++        self._committed: dict[ConversationEngineCacheKey, ConversationEngineState] = {}
++        self._pending: dict[
++            ConversationEngineCacheKey, PendingConversationEngineState
++        ] = {}
++
++    def stage(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++        token_ids: list[int] | tuple[int, ...],
++        prompt_token_ids: list[int] | tuple[int, ...],
++        output_token_ids: list[int] | tuple[int, ...],
++        finish_reason: str | "FinishReason" | None,
++        stop_reason: int | str | None,
++        block_refs_by_group: tuple[tuple[Any, ...], ...] = (),
++        mamba_terminal_state_refs: tuple[ConversationMambaTerminalStateRef, ...] = (),
++        now: float | None = None,
++    ) -> ConversationEngineState | None:
++        now = time.monotonic() if now is None else now
++        self.expire_pending(now=now)
++        key = self.make_key(conversation_id, cache_salt)
++        if key in self._pending:
++            return None
++
++        old_state = self._committed.get(key)
++        new_state = ConversationEngineState(
++            key=key,
++            generation_id=generation_id,
++            token_count=len(token_ids),
++            committed_token_ids=tuple(token_ids),
++            prompt_token_ids=tuple(prompt_token_ids),
++            output_token_ids=tuple(output_token_ids),
++            finish_reason=self._finish_reason_to_str(finish_reason),
++            stop_reason=stop_reason,
++            block_refs_by_group=block_refs_by_group,
++            mamba_terminal_state_refs=mamba_terminal_state_refs,
++            created_at=now,
++            last_access=now,
++            completed_generations=(old_state.completed_generations if old_state else 0),
++        )
++        self._pending[key] = PendingConversationEngineState(
++            key=key,
++            previous_generation_id=old_state.generation_id if old_state else None,
++            pending_generation_id=generation_id,
++            old_state=old_state,
++            new_state=new_state,
++            created_at=now,
++            last_access=now,
++        )
++        return new_state
++
++    def stage_from_request(
++        self,
++        request: "Request",
++        *,
++        finish_reason: str | "FinishReason" | None,
++        block_refs_by_group: tuple[tuple[Any, ...], ...] = (),
++        mamba_terminal_state_refs: tuple[ConversationMambaTerminalStateRef, ...] = (),
++        now: float | None = None,
++    ) -> ConversationEngineState | None:
++        if not request.conversation_id or not request.conversation_generation_id:
++            return None
++        return self.stage(
++            conversation_id=request.conversation_id,
++            cache_salt=request.cache_salt,
++            generation_id=request.conversation_generation_id,
++            token_ids=tuple(request.all_token_ids),
++            prompt_token_ids=tuple(request.prompt_token_ids or ()),
++            output_token_ids=tuple(request.output_token_ids),
++            finish_reason=finish_reason,
++            stop_reason=request.stop_reason,
++            block_refs_by_group=block_refs_by_group,
++            mamba_terminal_state_refs=mamba_terminal_state_refs,
++            now=now,
++        )
++
++    def publish(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++        now: float | None = None,
++    ) -> bool:
++        return self.publish_with_released(
++            conversation_id=conversation_id,
++            cache_salt=cache_salt,
++            generation_id=generation_id,
++            now=now,
++        ).ok
++
++    def publish_with_released(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++        now: float | None = None,
++    ) -> ConversationCacheMutation:
++        now = time.monotonic() if now is None else now
++        expired = self.expire_pending_with_released(now=now).release_states
++        key = self.make_key(conversation_id, cache_salt)
++        pending = self._pending.get(key)
++        if pending is None or pending.pending_generation_id != generation_id:
++            return ConversationCacheMutation(False, expired)
++
++        new_state = pending.new_state
++        new_state.completed_generations += 1
++        new_state.last_access = now
++        self._committed[key] = new_state
++        del self._pending[key]
++        release_states = expired
++        if pending.old_state is not None:
++            release_states = (*release_states, pending.old_state)
++        return ConversationCacheMutation(True, release_states)
++
++    def discard_pending(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++        now: float | None = None,
++    ) -> bool:
++        return self.discard_pending_with_released(
++            conversation_id=conversation_id,
++            cache_salt=cache_salt,
++            generation_id=generation_id,
++            now=now,
++        ).ok
++
++    def discard_pending_with_released(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++        now: float | None = None,
++    ) -> ConversationCacheMutation:
++        now = time.monotonic() if now is None else now
++        expired = self.expire_pending_with_released(now=now).release_states
++        key = self.make_key(conversation_id, cache_salt)
++        pending = self._pending.get(key)
++        if pending is None or pending.pending_generation_id != generation_id:
++            return ConversationCacheMutation(False, expired)
++        del self._pending[key]
++        return ConversationCacheMutation(True, (*expired, pending.new_state))
++
++    def touch_pending(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++        now: float | None = None,
++    ) -> bool:
++        now = time.monotonic() if now is None else now
++        self.expire_pending(now=now)
++        key = self.make_key(conversation_id, cache_salt)
++        pending = self._pending.get(key)
++        if pending is None or pending.pending_generation_id != generation_id:
++            return False
++        pending.last_access = now
++        pending.new_state.last_access = now
++        return True
++
++    def delete(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++        now: float | None = None,
++    ) -> bool:
++        return self.delete_with_released(
++            conversation_id=conversation_id,
++            cache_salt=cache_salt,
++            now=now,
++        ).ok
++
++    def delete_with_released(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++        now: float | None = None,
++    ) -> ConversationCacheMutation:
++        now = time.monotonic() if now is None else now
++        expired = self.expire_pending_with_released(now=now).release_states
++        key = self.make_key(conversation_id, cache_salt)
++        if key in self._pending:
++            return ConversationCacheMutation(False, expired)
++        committed = self._committed.pop(key, None)
++        if committed is None:
++            return ConversationCacheMutation(False, expired)
++        return ConversationCacheMutation(True, (*expired, committed))
++
++    def get_committed(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> ConversationEngineState | None:
++        key = self.make_key(conversation_id, cache_salt)
++        state = self._committed.get(key)
++        if state is not None:
++            state.last_access = time.monotonic()
++        return state
++
++    def get_pending(
++        self,
++        *,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> PendingConversationEngineState | None:
++        return self._pending.get(self.make_key(conversation_id, cache_salt))
++
++    def expire_pending(self, *, now: float | None = None) -> int:
++        return len(self.expire_pending_with_released(now=now).release_states)
++
++    def expire_pending_with_released(
++        self,
++        *,
++        now: float | None = None,
++    ) -> ConversationCacheMutation:
++        if self.pending_ttl_seconds <= 0:
++            return ConversationCacheMutation(True)
++        now = time.monotonic() if now is None else now
++        expired = [
++            key
++            for key, pending in self._pending.items()
++            if now - pending.last_access > self.pending_ttl_seconds
++        ]
++        release_states = tuple(self._pending[key].new_state for key in expired)
++        for key in expired:
++            del self._pending[key]
++        return ConversationCacheMutation(True, release_states)
++
++    @staticmethod
++    def make_key(
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> ConversationEngineCacheKey:
++        return ConversationEngineCacheKey(
++            conversation_id=conversation_id,
++            cache_salt=cache_salt or "",
++        )
++
++    @staticmethod
++    def _finish_reason_to_str(reason: Any) -> str | None:
++        if reason is None:
++            return None
++        value = getattr(reason, "value", reason)
++        return str(value)
+diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
+index 83aa26b..c05a60c 100644
+--- a/vllm/v1/core/kv_cache_manager.py
++++ b/vllm/v1/core/kv_cache_manager.py
+@@ -8,10 +8,12 @@ from typing import Literal, overload
+ 
+ from vllm.distributed.kv_events import KVCacheEvent
+ from vllm.logger import init_logger
++from vllm.v1.core.conversation_cache import ConversationBlockCopy
+ from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
+ from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
+ from vllm.v1.core.kv_cache_utils import KVCacheBlock
+-from vllm.v1.kv_cache_interface import KVCacheConfig
++from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
++from vllm.v1.kv_cache_interface import MambaSpec, TQFullAttentionSpec
+ from vllm.v1.metrics.stats import PrefixCacheStats
+ from vllm.v1.request import Request
+ 
+@@ -530,6 +532,260 @@ class KVCacheManager:
+         """Get the block ids of a request."""
+         return self.get_blocks(request_id).get_block_ids()
+ 
++    def get_block_refs_by_group(
++        self,
++        request_id: str,
++    ) -> tuple[tuple[KVCacheBlock, ...], ...]:
++        """Get physical block refs for exact conversation ownership."""
++        return tuple(
++            manager.get_block_refs(request_id)
++            for manager in self.coordinator.single_type_managers
++        )
++
++    def forget_request_blocks(
++        self,
++        request_id: str,
++    ) -> tuple[tuple[KVCacheBlock, ...], ...]:
++        """Remove request block bookkeeping without freeing block refs."""
++        return tuple(
++            manager.forget_request_blocks(request_id)
++            for manager in self.coordinator.single_type_managers
++        )
++
++    def release_block_refs_by_group(
++        self,
++        blocks_by_group: Sequence[Sequence[KVCacheBlock]],
++    ) -> None:
++        """Release conversation-owned block refs for every KV cache group."""
++        for manager, blocks in zip(
++            self.coordinator.single_type_managers,
++            blocks_by_group,
++        ):
++            manager.release_block_refs(blocks)
++
++    def attach_existing_blocks(
++        self,
++        request_id: str,
++        blocks_by_group: Sequence[Sequence[KVCacheBlock]],
++        *,
++        num_cached_blocks_by_group: Sequence[int] | None = None,
++    ) -> KVCacheBlocks:
++        """Attach existing conversation-owned blocks to a request."""
++        if num_cached_blocks_by_group is None:
++            num_cached_blocks_by_group = tuple(
++                len(blocks) for blocks in blocks_by_group
++            )
++        for manager, blocks, num_cached_blocks in zip(
++            self.coordinator.single_type_managers,
++            blocks_by_group,
++            num_cached_blocks_by_group,
++        ):
++            manager.attach_existing_blocks(
++                request_id,
++                blocks,
++                num_cached_blocks=num_cached_blocks,
++            )
++        return self.get_blocks(request_id)
++
++    def attach_full_attention_blocks_copy_on_write(
++        self,
++        request_id: str,
++        blocks_by_group: Sequence[Sequence[KVCacheBlock]],
++        *,
++        token_count: int,
++    ) -> tuple[KVCacheBlocks, tuple[ConversationBlockCopy, ...]]:
++        """Attach full-attention conversation refs with partial-tail COW.
++
++        Non-full-attention groups must be handled by their own exact-state
++        attach path before this is used for a hybrid request.
++        """
++        for manager, blocks in zip(
++            self.coordinator.single_type_managers,
++            blocks_by_group,
++        ):
++            if (
++                type(manager.kv_cache_spec)
++                not in (FullAttentionSpec, TQFullAttentionSpec)
++                and blocks
++            ):
++                raise ValueError(
++                    "full-attention COW attach cannot attach non-attention "
++                    "conversation blocks"
++                )
++
++        num_tail_copies = 0
++        for manager, blocks in zip(
++            self.coordinator.single_type_managers,
++            blocks_by_group,
++        ):
++            if type(manager.kv_cache_spec) not in (
++                FullAttentionSpec,
++                TQFullAttentionSpec,
++            ):
++                continue
++            num_full_blocks = token_count // manager.block_size
++            if (
++                token_count % manager.block_size != 0
++                and len(blocks) > num_full_blocks
++                and not blocks[num_full_blocks].is_null
++            ):
++                num_tail_copies += 1
++        if num_tail_copies > self.block_pool.get_num_free_blocks():
++            raise ValueError(
++                "No free blocks available for conversation tail COW attach"
++            )
++
++        copies: list[ConversationBlockCopy] = []
++        for manager, blocks in zip(
++            self.coordinator.single_type_managers,
++            blocks_by_group,
++        ):
++            if type(manager.kv_cache_spec) not in (
++                FullAttentionSpec,
++                TQFullAttentionSpec,
++            ):
++                continue
++            copies.extend(
++                manager.attach_full_attention_blocks_copy_on_write(
++                    request_id,
++                    blocks,
++                    token_count=token_count,
++                )
++            )
++        return self.get_blocks(request_id), tuple(copies)
++
++    def attach_conversation_blocks_copy_on_write(
++        self,
++        request_id: str,
++        blocks_by_group: Sequence[Sequence[KVCacheBlock]],
++        *,
++        token_count: int,
++        mamba_terminal_refs: dict[int, tuple[int, KVCacheBlock]],
++    ) -> tuple[KVCacheBlocks, tuple[ConversationBlockCopy, ...]]:
++        """Attach exact conversation state with request-owned mutable blocks."""
++        for group_id, (manager, blocks) in enumerate(
++            zip(self.coordinator.single_type_managers, blocks_by_group)
++        ):
++            if type(manager.kv_cache_spec) in (
++                FullAttentionSpec,
++                TQFullAttentionSpec,
++            ):
++                continue
++            if isinstance(manager.kv_cache_spec, MambaSpec):
++                if blocks and group_id not in mamba_terminal_refs:
++                    raise ValueError(
++                        "Mamba conversation attach requires exact terminal refs"
++                    )
++                continue
++            if blocks:
++                raise ValueError(
++                    "Unsupported KV cache group for conversation attach: "
++                    f"{type(manager.kv_cache_spec).__name__}"
++                )
++
++        num_tail_copies = 0
++        for manager, blocks in zip(
++            self.coordinator.single_type_managers,
++            blocks_by_group,
++        ):
++            if type(manager.kv_cache_spec) not in (
++                FullAttentionSpec,
++                TQFullAttentionSpec,
++            ):
++                continue
++            num_full_blocks = token_count // manager.block_size
++            if (
++                token_count % manager.block_size != 0
++                and len(blocks) > num_full_blocks
++                and not blocks[num_full_blocks].is_null
++            ):
++                num_tail_copies += 1
++        if (
++            num_tail_copies + len(mamba_terminal_refs)
++            > self.block_pool.get_num_free_blocks()
++        ):
++            raise ValueError("No free blocks available for conversation COW attach")
++
++        copies: list[ConversationBlockCopy] = []
++        for group_id, (manager, blocks) in enumerate(
++            zip(self.coordinator.single_type_managers, blocks_by_group)
++        ):
++            if type(manager.kv_cache_spec) in (
++                FullAttentionSpec,
++                TQFullAttentionSpec,
++            ):
++                copies.extend(
++                    manager.attach_full_attention_blocks_copy_on_write(
++                        request_id,
++                        blocks,
++                        token_count=token_count,
++                    )
++                )
++                continue
++            if isinstance(manager.kv_cache_spec, MambaSpec):
++                ref = mamba_terminal_refs.get(group_id)
++                if ref is None:
++                    continue
++                expected_block_index, block = ref
++                attached_block_index, copy = (
++                    manager.attach_terminal_state_block_copy_on_write(
++                        request_id,
++                        token_count,
++                        block,
++                    )
++                )
++                if attached_block_index != expected_block_index:
++                    raise ValueError("Mamba terminal ref block index mismatch")
++                copies.append(copy)
++        return self.get_blocks(request_id), tuple(copies)
++
++    def get_mamba_terminal_state_block_refs(
++        self,
++        request_id: str,
++        token_count: int,
++    ) -> dict[int, tuple[int, KVCacheBlock]]:
++        """Get exact terminal Mamba state block refs by KV cache group."""
++        refs: dict[int, tuple[int, KVCacheBlock]] = {}
++        for group_id, manager in enumerate(self.coordinator.single_type_managers):
++            if not isinstance(manager.kv_cache_spec, MambaSpec):
++                continue
++            if getattr(manager, "mamba_cache_mode", None) != "align":
++                continue
++            ref = manager.get_terminal_state_block_ref(request_id, token_count)
++            if ref is not None:
++                refs[group_id] = ref
++        return refs
++
++    def attach_mamba_terminal_state_block_refs(
++        self,
++        request_id: str,
++        token_count: int,
++        refs: dict[int, tuple[int, KVCacheBlock]],
++    ) -> dict[int, int]:
++        """Attach exact terminal Mamba state refs to a request.
++
++        The returned mapping is group id to attached block-table index.
++        """
++        attached: dict[int, int] = {}
++        for group_id, (_block_index, block) in refs.items():
++            manager = self.coordinator.single_type_managers[group_id]
++            assert isinstance(manager.kv_cache_spec, MambaSpec)
++            attached[group_id] = manager.attach_terminal_state_block(
++                request_id,
++                token_count,
++                block,
++            )
++        return attached
++
++    def release_mamba_terminal_state_block_refs(
++        self,
++        refs: dict[int, tuple[int, KVCacheBlock]],
++    ) -> None:
++        for group_id, (_block_index, block) in refs.items():
++            manager = self.coordinator.single_type_managers[group_id]
++            assert isinstance(manager.kv_cache_spec, MambaSpec)
++            manager.release_block_refs([block])
++
+     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
+         """Cache the blocks for the request, if enabled.
+ 
+diff --git a/vllm/v1/core/sched/output.py b/vllm/v1/core/sched/output.py
+index bdb97de..902f9f7 100644
+--- a/vllm/v1/core/sched/output.py
++++ b/vllm/v1/core/sched/output.py
+@@ -5,6 +5,11 @@ from dataclasses import dataclass
+ from functools import cached_property
+ from typing import TYPE_CHECKING
+ 
++from vllm.v1.core.conversation_cache import (
++    ConversationBlockCopy,
++    ConversationMambaTerminalCapture,
++)
++
+ if TYPE_CHECKING:
+     import numpy as np
+     import numpy.typing as npt
+@@ -238,6 +243,16 @@ class SchedulerOutput:
+     # preventing stale NaN/data from corrupting attention or SSM computation.
+     new_block_ids_to_zero: list[int] | None = None
+ 
++    # Exact conversation-cache block copies to run after freshly allocated
++    # blocks are zeroed and before the block table is used for execution.
++    conversation_block_copies: list[ConversationBlockCopy] | None = None
++
++    # Exact conversation-cache Mamba terminal captures to run before the worker
++    # removes finished request state. Empty until scheduler commit emits them.
++    conversation_mamba_terminal_captures: (
++        list[ConversationMambaTerminalCapture] | None
++    ) = None
++
+     @classmethod
+     def make_empty(cls) -> "SchedulerOutput":
+         return cls(
+diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
+index 395fa80..f95cff7 100644
+--- a/vllm/v1/core/sched/scheduler.py
++++ b/vllm/v1/core/sched/scheduler.py
+@@ -32,6 +32,12 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+ )
+ from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
+ from vllm.multimodal.encoder_budget import MultiModalBudget
++from vllm.v1.core.conversation_cache import (
++    ConversationBlockCopy,
++    ConversationEngineCache,
++    ConversationEngineState,
++    ConversationMambaTerminalStateRef,
++)
+ from vllm.v1.core.encoder_cache_manager import (
+     EncoderCacheManager,
+     EncoderDecoderCacheManager,
+@@ -54,7 +60,11 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
+ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+ from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+ from vllm.v1.metrics.perf import ModelMetrics, PerfStats
+-from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
++from vllm.v1.metrics.stats import (
++    ConversationCacheStats,
++    PrefixCacheStats,
++    SchedulerStats,
++)
+ from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
+ from vllm.v1.spec_decode.metrics import SpecDecodingStats
+@@ -120,6 +130,9 @@ class Scheduler(SchedulerInterface):
+         # KV Connector pushes/pull of remote KVs for P/D and offloading.
+         self.connector = None
+         self.connector_prefix_cache_stats: PrefixCacheStats | None = None
++        self.conversation_cache_stats: ConversationCacheStats | None = (
++            ConversationCacheStats() if self.log_stats else None
++        )
+         self.recompute_kv_load_failures = True
+         if self.vllm_config.kv_transfer_config is not None:
+             assert not self.is_encoder_decoder, (
+@@ -238,6 +251,8 @@ class Scheduler(SchedulerInterface):
+             hash_block_size=hash_block_size,
+             metrics_collector=self.kv_metrics_collector,
+         )
++        self.conversation_cache = ConversationEngineCache()
++        self._conversation_block_copies_to_run: list[ConversationBlockCopy] = []
+         # Bind GPU block pool to the KV connector. This must happen after
+         # kv_cache_manager is constructed so block_pool is available.
+         if self.connector is not None and hasattr(
+@@ -914,11 +929,12 @@ class Scheduler(SchedulerInterface):
+         self.prev_step_scheduled_req_ids.clear()
+         self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
+ 
++        new_block_ids = self.kv_cache_manager.take_new_block_ids()
+         new_block_ids_to_zero = (
+-            (self.kv_cache_manager.take_new_block_ids() or None)
+-            if self.needs_kv_cache_zeroing
+-            else None
++            (new_block_ids or None) if self.needs_kv_cache_zeroing else None
+         )
++        conversation_block_copies = self._conversation_block_copies_to_run or None
++        self._conversation_block_copies_to_run = []
+ 
+         scheduler_output = SchedulerOutput(
+             scheduled_new_reqs=new_reqs_data,
+@@ -936,6 +952,7 @@ class Scheduler(SchedulerInterface):
+             finished_req_ids=self.finished_req_ids,
+             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
+             new_block_ids_to_zero=new_block_ids_to_zero,
++            conversation_block_copies=conversation_block_copies,
+         )
+ 
+         # NOTE(Kuntai): this function is designed for multiple purposes:
+@@ -1438,6 +1455,7 @@ class Scheduler(SchedulerInterface):
+                 finish_reason = request.get_finished_reason()
+                 finished = self._handle_stopped_request(request)
+                 if finished:
++                    self._stage_conversation_cache_pending(request, finish_reason)
+                     kv_transfer_params = self._free_request(request)
+ 
+                 if status_before_stop == RequestStatus.RUNNING:
+@@ -1755,11 +1773,104 @@ class Scheduler(SchedulerInterface):
+         else:
+             if request.resumable:
+                 request.streaming_queue = deque()
++            self._maybe_attach_conversation_cache(request)
+             self._enqueue_waiting_request(request)
+             self.requests[request.request_id] = request
+             if self.log_stats:
+                 request.record_event(EngineCoreEventType.QUEUED)
+ 
++    def _maybe_attach_conversation_cache(self, request: Request) -> None:
++        if not request.conversation_id or not request.conversation_generation_id:
++            return
++        if self.connector is not None or self.ec_connector is not None:
++            return
++
++        conversation_cache_hits = 0
++        state = self.conversation_cache.get_committed(
++            conversation_id=request.conversation_id,
++            cache_salt=request.cache_salt,
++        )
++        if state is None or not state.block_refs_by_group:
++            self._record_conversation_cache_stats(request, conversation_cache_hits)
++            return
++        if state.token_count <= 0:
++            self._record_conversation_cache_stats(request, conversation_cache_hits)
++            return
++        if state.token_count >= request.num_tokens:
++            logger.warning(
++                "Conversation cache attach skipped for %s generation %s because "
++                "committed tokens=%d >= request tokens=%d. This usually means "
++                "the frontend did not reconstruct the committed conversation "
++                "prefix before scheduling.",
++                request.conversation_id,
++                request.conversation_generation_id,
++                state.token_count,
++                request.num_tokens,
++            )
++            self._record_conversation_cache_stats(request, conversation_cache_hits)
++            return
++
++        mamba_terminal_refs = self._get_state_mamba_terminal_block_refs(state)
++        try:
++            _attached_blocks, copies = (
++                self.kv_cache_manager.attach_conversation_blocks_copy_on_write(
++                    request.request_id,
++                    state.block_refs_by_group,
++                    token_count=state.token_count,
++                    mamba_terminal_refs=mamba_terminal_refs,
++                )
++            )
++        except ValueError as exc:
++            logger.debug(
++                "Conversation cache attach skipped for %s generation %s: %s",
++                request.conversation_id,
++                request.conversation_generation_id,
++                exc,
++            )
++            self._record_conversation_cache_stats(request, conversation_cache_hits)
++            return
++
++        conversation_cache_hits = state.token_count
++        request.num_computed_tokens = state.token_count
++        self._record_conversation_cache_stats(request, conversation_cache_hits)
++        self._conversation_block_copies_to_run.extend(copies)
++        logger.info(
++            "Attached conversation cache for %s generation %s tokens=%d copies=%d.",
++            request.conversation_id,
++            request.conversation_generation_id,
++            state.token_count,
++            len(copies),
++        )
++
++    def _record_conversation_cache_stats(
++        self,
++        request: Request,
++        num_hits: int,
++    ) -> None:
++        if self.conversation_cache_stats is None:
++            return
++        self.conversation_cache_stats.record(
++            num_tokens=request.num_tokens,
++            num_hits=num_hits,
++        )
++
++    def _get_state_mamba_terminal_block_refs(
++        self,
++        state: ConversationEngineState,
++    ) -> dict[int, tuple[int, Any]]:
++        refs: dict[int, tuple[int, Any]] = {}
++        for ref in state.mamba_terminal_state_refs:
++            if ref.kv_cache_group_id >= len(state.block_refs_by_group):
++                continue
++            blocks = state.block_refs_by_group[ref.kv_cache_group_id]
++            if ref.block_index >= len(blocks):
++                continue
++            block = blocks[ref.block_index]
++            if block.block_id != ref.block_id:
++                continue
++            refs[ref.kv_cache_group_id] = (ref.block_index, block)
++        return refs
++
+     def finish_requests(
+         self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
+     ) -> list[tuple[str, int]]:
+@@ -1846,6 +1957,77 @@ class Scheduler(SchedulerInterface):
+         self.kv_cache_manager.free(request)
+         del self.requests[request.request_id]
+ 
++    def _stage_conversation_cache_pending(
++        self,
++        request: Request,
++        finish_reason: Any,
++    ) -> None:
++        if not request.conversation_id:
++            return
++        if request.status not in (
++            RequestStatus.FINISHED_STOPPED,
++            RequestStatus.FINISHED_LENGTH_CAPPED,
++            RequestStatus.FINISHED_REPETITION,
++        ):
++            return
++        if self.connector is not None or self.ec_connector is not None:
++            logger.warning(
++                "Conversation cache physical staging is disabled with KV/EC "
++                "connector paths enabled."
++            )
++            return
++
++        self._release_conversation_states(
++            self.conversation_cache.expire_pending_with_released().release_states
++        )
++        block_refs_by_group = self.kv_cache_manager.get_block_refs_by_group(
++            request.request_id
++        )
++        mamba_refs = tuple(
++            ConversationMambaTerminalStateRef(
++                kv_cache_group_id=group_id,
++                block_index=block_index,
++                block_id=block.block_id,
++            )
++            for group_id, (
++                block_index,
++                block,
++            ) in self.kv_cache_manager.get_mamba_terminal_state_block_refs(
++                request.request_id,
++                request.num_tokens,
++            ).items()
++        )
++        staged = self.conversation_cache.stage_from_request(
++            request,
++            finish_reason=finish_reason,
++            block_refs_by_group=block_refs_by_group,
++            mamba_terminal_state_refs=mamba_refs,
++        )
++        if staged is None:
++            logger.warning(
++                "Failed to stage pending conversation cache for %s generation %s.",
++                request.conversation_id,
++                request.conversation_generation_id,
++            )
++        else:
++            logger.debug(
++                "Staged pending conversation cache for %s generation %s tokens=%d.",
++                request.conversation_id,
++                request.conversation_generation_id,
++                staged.token_count,
++            )
++            self.kv_cache_manager.forget_request_blocks(request.request_id)
++
++    def _release_conversation_states(
++        self,
++        states: tuple[ConversationEngineState, ...],
++    ) -> None:
++        for state in states:
++            if state.block_refs_by_group:
++                self.kv_cache_manager.release_block_refs_by_group(
++                    state.block_refs_by_group
++                )
++
+     @property
+     def pause_state(self) -> PauseState:
+         return self._pause_state
+@@ -1936,6 +2118,58 @@ class Scheduler(SchedulerInterface):
+         """
+         self.encoder_cache_manager.reset()
+ 
++    def publish_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        mutation = self.conversation_cache.publish_with_released(
++            conversation_id=conversation_id,
++            cache_salt=cache_salt,
++            generation_id=generation_id,
++        )
++        self._release_conversation_states(mutation.release_states)
++        return mutation.ok
++
++    def discard_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        mutation = self.conversation_cache.discard_pending_with_released(
++            conversation_id=conversation_id,
++            cache_salt=cache_salt,
++            generation_id=generation_id,
++        )
++        self._release_conversation_states(mutation.release_states)
++        return mutation.ok
++
++    def touch_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.conversation_cache.touch_pending(
++            conversation_id=conversation_id,
++            cache_salt=cache_salt,
++            generation_id=generation_id,
++        )
++
++    def delete_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        mutation = self.conversation_cache.delete_with_released(
++            conversation_id=conversation_id,
++            cache_salt=cache_salt,
++        )
++        self._release_conversation_states(mutation.release_states)
++        return mutation.ok
++
+     def make_stats(
+         self,
+         spec_decoding_stats: SpecDecodingStats | None = None,
+@@ -1951,6 +2185,9 @@ class Scheduler(SchedulerInterface):
+         if self.connector_prefix_cache_stats is not None:
+             connector_prefix_cache_stats = self.connector_prefix_cache_stats
+             self.connector_prefix_cache_stats = PrefixCacheStats()
++        assert self.conversation_cache_stats is not None
++        conversation_cache_stats = self.conversation_cache_stats
++        self.conversation_cache_stats = ConversationCacheStats()
+         eviction_events = (
+             self.kv_metrics_collector.drain_events()
+             if self.kv_metrics_collector is not None
+@@ -1967,6 +2204,7 @@ class Scheduler(SchedulerInterface):
+             kv_cache_usage=self.kv_cache_manager.usage,
+             prefix_cache_stats=prefix_cache_stats,
+             connector_prefix_cache_stats=connector_prefix_cache_stats,
++            conversation_cache_stats=conversation_cache_stats,
+             kv_cache_eviction_events=eviction_events,
+             spec_decoding_stats=spec_stats,
+             kv_connector_stats=connector_stats_payload,
+diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
+index 0aa08f3..7b54825 100644
+--- a/vllm/v1/core/single_type_kv_cache_manager.py
++++ b/vllm/v1/core/single_type_kv_cache_manager.py
+@@ -7,6 +7,7 @@ from collections.abc import Sequence
+ 
+ from vllm.utils.math_utils import cdiv
+ from vllm.v1.core.block_pool import BlockPool
++from vllm.v1.core.conversation_cache import ConversationBlockCopy
+ from vllm.v1.core.kv_cache_utils import (
+     BlockHashList,
+     BlockHashWithGroupId,
+@@ -313,6 +314,100 @@ class SingleTypeKVCacheManager(ABC):
+         self.block_pool.free_blocks(ordered_blocks)
+         self.num_cached_block.pop(request_id, None)
+ 
++    def get_block_refs(self, request_id: str) -> tuple[KVCacheBlock, ...]:
++        """Return the request's current physical block refs."""
++        return tuple(self.req_to_blocks.get(request_id) or ())
++
++    def forget_request_blocks(self, request_id: str) -> tuple[KVCacheBlock, ...]:
++        """Remove request bookkeeping without decrementing block refs."""
++        blocks = tuple(self.req_to_blocks.pop(request_id, ()))
++        self.num_cached_block.pop(request_id, None)
++        return blocks
++
++    def release_block_refs(self, blocks: Sequence[KVCacheBlock]) -> None:
++        """Release conversation-owned block refs."""
++        real_blocks = [block for block in reversed(blocks) if not block.is_null]
++        self.block_pool.free_blocks(real_blocks)
++
++    def attach_existing_blocks(
++        self,
++        request_id: str,
++        blocks: Sequence[KVCacheBlock],
++        *,
++        num_cached_blocks: int | None = None,
++    ) -> None:
++        """Attach existing conversation-owned blocks to a new request.
++
++        This increments refs for real blocks and records request ownership.
++        It does not copy a partial tail block; copy-on-write tail handling is a
++        separate scheduler/worker step.
++        """
++        req_blocks = self.req_to_blocks[request_id]
++        assert len(req_blocks) == 0
++        real_blocks = [block for block in blocks if not block.is_null]
++        self.block_pool.touch(real_blocks)
++        req_blocks.extend(blocks)
++        self.num_cached_block[request_id] = (
++            len(blocks) if num_cached_blocks is None else num_cached_blocks
++        )
++
++    def attach_full_attention_blocks_copy_on_write(
++        self,
++        request_id: str,
++        blocks: Sequence[KVCacheBlock],
++        *,
++        token_count: int,
++    ) -> tuple[ConversationBlockCopy, ...]:
++        """Attach full-attention conversation blocks with tail COW.
++
++        Complete blocks are shared by refcount. A non-block-aligned committed
++        tail is copied into a fresh request-owned block so later suffix tokens
++        cannot mutate the committed conversation state before publish succeeds.
++        """
++        if type(self.kv_cache_spec) not in (FullAttentionSpec, TQFullAttentionSpec):
++            raise ValueError("copy-on-write attach is only for full attention")
++
++        req_blocks = self.req_to_blocks[request_id]
++        assert len(req_blocks) == 0
++
++        num_full_blocks = token_count // self.block_size
++        has_tail = token_count % self.block_size != 0
++        num_required_blocks = num_full_blocks + int(has_tail)
++        if len(blocks) < num_required_blocks:
++            raise ValueError(
++                f"Need {num_required_blocks} committed blocks for "
++                f"{token_count} tokens, got {len(blocks)}"
++            )
++
++        shared_blocks = list(blocks[:num_full_blocks])
++        real_shared_blocks = [block for block in shared_blocks if not block.is_null]
++        self.block_pool.touch(real_shared_blocks)
++        req_blocks.extend(shared_blocks)
++
++        copies: list[ConversationBlockCopy] = []
++        if has_tail:
++            src_block = blocks[num_full_blocks]
++            if src_block.is_null:
++                req_blocks.append(src_block)
++            else:
++                if self.block_pool.get_num_free_blocks() < 1:
++                    raise ValueError("No free block available for conversation tail COW")
++                dst_block = self.block_pool.get_new_blocks(1)[0]
++                req_blocks.append(dst_block)
++                self.new_block_ids.append(dst_block.block_id)
++                copies.append(
++                    ConversationBlockCopy(
++                        request_id=request_id,
++                        kv_cache_group_id=self.kv_cache_group_id,
++                        src_block_id=src_block.block_id,
++                        dst_block_id=dst_block.block_id,
++                        kind="full_attention_tail",
++                    )
++                )
++
++        self.num_cached_block[request_id] = num_full_blocks
++        return tuple(copies)
++
+     @abstractmethod
+     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
+         """
+@@ -1035,6 +1130,75 @@ class MambaManager(SingleTypeKVCacheManager):
+             self.last_state_block_idx.pop(request_id, None)
+         super().free(request_id)
+ 
++    def forget_request_blocks(self, request_id: str) -> tuple[KVCacheBlock, ...]:
++        if self.mamba_cache_mode == "align":
++            self._allocated_block_reqs.discard(request_id)
++            self.last_state_block_idx.pop(request_id, None)
++        return super().forget_request_blocks(request_id)
++
++    def get_terminal_state_block_index(self, token_count: int) -> int:
++        assert isinstance(self.kv_cache_spec, MambaSpec)
++        if self.mamba_cache_mode != "align":
++            raise ValueError("Mamba terminal state refs require align cache mode")
++        if token_count <= 0:
++            raise ValueError("Mamba terminal state refs require at least one token")
++        return (token_count - 1) // self.block_size
++
++    def get_terminal_state_block_ref(
++        self,
++        request_id: str,
++        token_count: int,
++    ) -> tuple[int, KVCacheBlock] | None:
++        block_index = self.get_terminal_state_block_index(token_count)
++        blocks = self.req_to_blocks.get(request_id)
++        if blocks is None or block_index >= len(blocks):
++            return None
++        block = blocks[block_index]
++        if block.is_null:
++            return None
++        return block_index, block
++
++    def attach_terminal_state_block(
++        self,
++        request_id: str,
++        token_count: int,
++        block: KVCacheBlock,
++    ) -> int:
++        block_index = self.get_terminal_state_block_index(token_count)
++        req_blocks = self.req_to_blocks[request_id]
++        assert len(req_blocks) == 0
++        req_blocks.extend([self._null_block] * block_index)
++        self.block_pool.touch([block])
++        req_blocks.append(block)
++        self.num_cached_block[request_id] = len(req_blocks)
++        return block_index
++
++    def attach_terminal_state_block_copy_on_write(
++        self,
++        request_id: str,
++        token_count: int,
++        block: KVCacheBlock,
++    ) -> tuple[int, ConversationBlockCopy]:
++        """Attach a request-owned copy of an exact terminal Mamba state."""
++        block_index = self.get_terminal_state_block_index(token_count)
++        req_blocks = self.req_to_blocks[request_id]
++        assert len(req_blocks) == 0
++        if self.block_pool.get_num_free_blocks() < 1:
++            raise ValueError("No free block available for Mamba terminal COW")
++        dst_block = self.block_pool.get_new_blocks(1)[0]
++        req_blocks.extend([self._null_block] * block_index)
++        req_blocks.append(dst_block)
++        self.num_cached_block[request_id] = len(req_blocks)
++        if self.mamba_cache_mode == "align":
++            self._allocated_block_reqs.add(request_id)
++        return block_index, ConversationBlockCopy(
++            request_id=request_id,
++            kv_cache_group_id=self.kv_cache_group_id,
++            src_block_id=block.block_id,
++            dst_block_id=dst_block.block_id,
++            kind="mamba_terminal",
++        )
++
+     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
+         """
+         Get the number of tokens whose mamba state are not needed anymore. Mamba only
+diff --git a/vllm/v1/engine/__init__.py b/vllm/v1/engine/__init__.py
+index d5c5dba..434a7ff 100644
+--- a/vllm/v1/engine/__init__.py
++++ b/vllm/v1/engine/__init__.py
+@@ -115,6 +115,9 @@ class EngineCoreRequest(
+ 
+     reasoning_ended: bool | None = None
+ 
++    conversation_id: str | None = None
++    conversation_generation_id: str | None = None
++
+     @property
+     def params(self) -> SamplingParams | PoolingParams:
+         """Return the processed params (sampling or pooling)."""
+diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
+index 45ae416..db58476 100644
+--- a/vllm/v1/engine/async_llm.py
++++ b/vllm/v1/engine/async_llm.py
+@@ -894,6 +894,45 @@ class AsyncLLM(EngineClient):
+     async def reset_encoder_cache(self) -> None:
+         await self.engine_core.reset_encoder_cache_async()
+ 
++    async def publish_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return await self.engine_core.publish_conversation_cache_async(
++            conversation_id, cache_salt, generation_id
++        )
++
++    async def discard_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return await self.engine_core.discard_conversation_cache_pending_async(
++            conversation_id, cache_salt, generation_id
++        )
++
++    async def touch_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return await self.engine_core.touch_conversation_cache_pending_async(
++            conversation_id, cache_salt, generation_id
++        )
++
++    async def delete_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        return await self.engine_core.delete_conversation_cache_async(
++            conversation_id, cache_salt
++        )
++
+     async def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+         await self.engine_core.sleep_async(level, mode)
+ 
+diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
+index 36864ba..e5053b6 100644
+--- a/vllm/v1/engine/core.py
++++ b/vllm/v1/engine/core.py
+@@ -626,6 +626,43 @@ class EngineCore:
+         # Reset the GPU model runner's encoder cache (physical storage)
+         self.model_executor.reset_encoder_cache()
+ 
++    def publish_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.scheduler.publish_conversation_cache(
++            conversation_id, cache_salt, generation_id
++        )
++
++    def discard_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.scheduler.discard_conversation_cache_pending(
++            conversation_id, cache_salt, generation_id
++        )
++
++    def touch_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.scheduler.touch_conversation_cache_pending(
++            conversation_id, cache_salt, generation_id
++        )
++
++    def delete_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        return self.scheduler.delete_conversation_cache(conversation_id, cache_salt)
++
+     def _reset_caches(self, reset_running_requests=True) -> None:
+         self.reset_prefix_cache(reset_running_requests=reset_running_requests)
+         self.reset_mm_cache()
+diff --git a/vllm/v1/engine/core_client.py b/vllm/v1/engine/core_client.py
+index 2f2c15d..66083e2 100644
+--- a/vllm/v1/engine/core_client.py
++++ b/vllm/v1/engine/core_client.py
+@@ -155,6 +155,37 @@ class EngineCoreClient(ABC):
+     def reset_encoder_cache(self) -> None:
+         raise NotImplementedError
+ 
++    def publish_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        raise NotImplementedError
++
++    def discard_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        raise NotImplementedError
++
++    def touch_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        raise NotImplementedError
++
++    def delete_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        raise NotImplementedError
++
+     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+         raise NotImplementedError
+ 
+@@ -232,6 +263,37 @@ class EngineCoreClient(ABC):
+     async def reset_encoder_cache_async(self) -> None:
+         raise NotImplementedError
+ 
++    async def publish_conversation_cache_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        raise NotImplementedError
++
++    async def discard_conversation_cache_pending_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        raise NotImplementedError
++
++    async def touch_conversation_cache_pending_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        raise NotImplementedError
++
++    async def delete_conversation_cache_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        raise NotImplementedError
++
+     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+         raise NotImplementedError
+ 
+@@ -319,6 +381,78 @@ class InprocClient(EngineCoreClient):
+     def reset_encoder_cache(self) -> None:
+         self.engine_core.reset_encoder_cache()
+ 
++    def publish_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.engine_core.publish_conversation_cache(
++            conversation_id, cache_salt, generation_id
++        )
++
++    async def publish_conversation_cache_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.publish_conversation_cache(conversation_id, cache_salt, generation_id)
++
++    def discard_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.engine_core.discard_conversation_cache_pending(
++            conversation_id, cache_salt, generation_id
++        )
++
++    async def discard_conversation_cache_pending_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.discard_conversation_cache_pending(
++            conversation_id, cache_salt, generation_id
++        )
++
++    def touch_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.engine_core.touch_conversation_cache_pending(
++            conversation_id, cache_salt, generation_id
++        )
++
++    async def touch_conversation_cache_pending_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.touch_conversation_cache_pending(
++            conversation_id, cache_salt, generation_id
++        )
++
++    def delete_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        return self.engine_core.delete_conversation_cache(conversation_id, cache_salt)
++
++    async def delete_conversation_cache_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        return self.delete_conversation_cache(conversation_id, cache_salt)
++
+     def sleep(self, level: int = 1, mode: PauseMode = "abort") -> None:
+         if mode == "wait":
+             raise ValueError("'wait' pause mode is not supported in inproc-engine mode")
+@@ -845,6 +979,51 @@ class SyncMPClient(MPClient):
+     def reset_encoder_cache(self) -> None:
+         self.call_utility("reset_encoder_cache")
+ 
++    def publish_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.call_utility(
++            "publish_conversation_cache", conversation_id, cache_salt, generation_id
++        )
++
++    def discard_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.call_utility(
++            "discard_conversation_cache_pending",
++            conversation_id,
++            cache_salt,
++            generation_id,
++        )
++
++    def touch_conversation_cache_pending(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return self.call_utility(
++            "touch_conversation_cache_pending",
++            conversation_id,
++            cache_salt,
++            generation_id,
++        )
++
++    def delete_conversation_cache(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        return self.call_utility(
++            "delete_conversation_cache", conversation_id, cache_salt
++        )
++
+     def add_lora(self, lora_request: LoRARequest) -> bool:
+         return self.call_utility("add_lora", lora_request)
+ 
+@@ -1093,6 +1272,51 @@ class AsyncMPClient(MPClient):
+     async def reset_encoder_cache_async(self) -> None:
+         await self.call_utility_async("reset_encoder_cache")
+ 
++    async def publish_conversation_cache_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return await self.call_utility_async(
++            "publish_conversation_cache", conversation_id, cache_salt, generation_id
++        )
++
++    async def discard_conversation_cache_pending_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return await self.call_utility_async(
++            "discard_conversation_cache_pending",
++            conversation_id,
++            cache_salt,
++            generation_id,
++        )
++
++    async def touch_conversation_cache_pending_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++        generation_id: str,
++    ) -> bool:
++        return await self.call_utility_async(
++            "touch_conversation_cache_pending",
++            conversation_id,
++            cache_salt,
++            generation_id,
++        )
++
++    async def delete_conversation_cache_async(
++        self,
++        conversation_id: str,
++        cache_salt: str | None,
++    ) -> bool:
++        return await self.call_utility_async(
++            "delete_conversation_cache", conversation_id, cache_salt
++        )
++
+     async def sleep_async(self, level: int = 1, mode: PauseMode = "abort") -> None:
+         await self.call_utility_async("sleep", level, mode)
+ 
+diff --git a/vllm/v1/engine/input_processor.py b/vllm/v1/engine/input_processor.py
+index b01163b..6d84804 100644
+--- a/vllm/v1/engine/input_processor.py
++++ b/vllm/v1/engine/input_processor.py
+@@ -371,6 +371,26 @@ class InputProcessor:
+             data_parallel_rank=data_parallel_rank,
+             trace_headers=trace_headers,
+             resumable=resumable,
++            conversation_id=decoder_inputs.get("conversation_id")
++            or (
++                sampling_params.extra_args.get("conversation_id")
++                if (
++                    sampling_params is not None
++                    and sampling_params.extra_args is not None
++                )
++                else None
++            ),
++            conversation_generation_id=decoder_inputs.get(
++                "conversation_generation_id"
++            )
++            or (
++                sampling_params.extra_args.get("conversation_generation_id")
++                if (
++                    sampling_params is not None
++                    and sampling_params.extra_args is not None
++                )
++                else None
++            ),
+         )
+ 
+     def _validate_prompt_len(
+diff --git a/vllm/v1/metrics/loggers.py b/vllm/v1/metrics/loggers.py
+index 6855efd..7bfcfdc 100644
+--- a/vllm/v1/metrics/loggers.py
++++ b/vllm/v1/metrics/loggers.py
+@@ -108,6 +108,7 @@ class LoggingStatLogger(StatLoggerBase):
+         # TODO: Make the interval configurable.
+         self.prefix_caching_metrics = CachingMetrics()
+         self.connector_prefix_caching_metrics = CachingMetrics()
++        self.conversation_caching_metrics = CachingMetrics()
+         self.mm_caching_metrics = CachingMetrics()
+ 
+         self.spec_decoding_logging = SpecDecodingLogging()
+@@ -171,6 +172,9 @@ class LoggingStatLogger(StatLoggerBase):
+ 
+         if scheduler_stats is not None:
+             self.prefix_caching_metrics.observe(scheduler_stats.prefix_cache_stats)
++            self.conversation_caching_metrics.observe(
++                scheduler_stats.conversation_cache_stats
++            )
+ 
+             if scheduler_stats.connector_prefix_cache_stats is not None:
+                 self.connector_prefix_caching_metrics.observe(
+@@ -264,6 +268,9 @@ class LoggingStatLogger(StatLoggerBase):
+         if not self.connector_prefix_caching_metrics.empty:
+             log_parts.append("External prefix cache hit rate: %.1f%%")
+             log_args.append(self.connector_prefix_caching_metrics.hit_rate * 100)
++        if not self.conversation_caching_metrics.empty:
++            log_parts.append("Conversation cache hit rate: %.1f%%")
++            log_args.append(self.conversation_caching_metrics.hit_rate * 100)
+         if not self.mm_caching_metrics.empty:
+             log_parts.append("MM cache hit rate: %.1f%%")
+             log_args.append(self.mm_caching_metrics.hit_rate * 100)
+@@ -559,6 +566,30 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
+             counter_prefix_cache_hits, per_engine_labelvalues
+         )
+ 
++        counter_conversation_cache_queries = self._counter_cls(
++            name="vllm:conversation_cache_queries",
++            documentation=(
++                "Conversation cache queries, in terms of number of queried prompt "
++                "tokens."
++            ),
++            labelnames=labelnames,
++        )
++        self.counter_conversation_cache_queries = create_metric_per_engine(
++            counter_conversation_cache_queries, per_engine_labelvalues
++        )
++
++        counter_conversation_cache_hits = self._counter_cls(
++            name="vllm:conversation_cache_hits",
++            documentation=(
++                "Conversation cache hits, in terms of number of attached cached "
++                "tokens."
++            ),
++            labelnames=labelnames,
++        )
++        self.counter_conversation_cache_hits = create_metric_per_engine(
++            counter_conversation_cache_hits, per_engine_labelvalues
++        )
++
+         #
+         # External - KV connector prefix cache
+         #
+@@ -1086,6 +1117,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
+             self.counter_prefix_cache_hits[engine_idx].inc(
+                 scheduler_stats.prefix_cache_stats.hits
+             )
++            self.counter_conversation_cache_queries[engine_idx].inc(
++                scheduler_stats.conversation_cache_stats.queries
++            )
++            self.counter_conversation_cache_hits[engine_idx].inc(
++                scheduler_stats.conversation_cache_stats.hits
++            )
+ 
+             if scheduler_stats.connector_prefix_cache_stats is not None:
+                 self.counter_connector_prefix_cache_queries[engine_idx].inc(
+diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
+index a7a5fb7..9abcf2d 100644
+--- a/vllm/v1/metrics/stats.py
++++ b/vllm/v1/metrics/stats.py
+@@ -142,6 +142,23 @@ class PrefixCacheStats(BaseCacheStats):
+             self.hits += num_hits
+ 
+ 
++@dataclass
++class ConversationCacheStats(BaseCacheStats):
++    """
++    Stores exact conversation cache hit statistics.
++    - `queries`: Refers to the number of prompt tokens in conversation-id
++      requests that were eligible for exact conversation-cache attach.
++    - `hits`: Refers to the number of committed prefix tokens attached from
++      the conversation cache.
++    """
++
++    def record(self, num_tokens: int, num_hits: int) -> None:
++        """Aggregate request information into the stats."""
++        self.requests += 1
++        self.queries += num_tokens
++        self.hits += num_hits
++
++
+ @dataclass
+ class MultiModalCacheStats(BaseCacheStats):
+     """
+@@ -184,6 +201,9 @@ class SchedulerStats:
+ 
+     prefix_cache_stats: PrefixCacheStats = field(default_factory=PrefixCacheStats)
+     connector_prefix_cache_stats: PrefixCacheStats | None = None
++    conversation_cache_stats: ConversationCacheStats = field(
++        default_factory=ConversationCacheStats
++    )
+ 
+     kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
+ 
+diff --git a/vllm/v1/request.py b/vllm/v1/request.py
+index 678d575..b2b716a 100644
+--- a/vllm/v1/request.py
++++ b/vllm/v1/request.py
+@@ -74,6 +74,8 @@ class Request:
+         block_hasher: Callable[["Request"], list["BlockHash"]] | None = None,
+         resumable: bool = False,
+         reasoning_ended: bool | None = None,
++        conversation_id: str | None = None,
++        conversation_generation_id: str | None = None,
+     ) -> None:
+         self.request_id = request_id
+         self.client_index = client_index
+@@ -94,6 +96,8 @@ class Request:
+ 
+         # P/D: Connector-specific KV transfer parameters.
+         self.kv_transfer_params: dict[str, Any] | None = None
++        self.conversation_id: str | None = conversation_id
++        self.conversation_generation_id: str | None = conversation_generation_id
+ 
+         if pooling_params is not None:
+             # Pooling models.
+@@ -109,6 +113,14 @@ class Request:
+                 self.kv_transfer_params = sampling_params.extra_args.get(
+                     "kv_transfer_params"
+                 )
++                if self.conversation_id is None:
++                    self.conversation_id = sampling_params.extra_args.get(
++                        "conversation_id"
++                    )
++                if self.conversation_generation_id is None:
++                    self.conversation_generation_id = sampling_params.extra_args.get(
++                        "conversation_generation_id"
++                    )
+         else:
+             raise ValueError("sampling_params and pooling_params can't both be unset")
+ 
+@@ -195,6 +207,8 @@ class Request:
+             block_hasher=block_hasher,
+             resumable=request.resumable,
+             reasoning_ended=request.reasoning_ended,
++            conversation_id=request.conversation_id,
++            conversation_generation_id=request.conversation_generation_id,
+         )
+ 
+     def append_output_token_ids(
+diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
+index a0ba47f..774ae94 100644
+--- a/vllm/v1/worker/gpu_model_runner.py
++++ b/vllm/v1/worker/gpu_model_runner.py
+@@ -1041,6 +1041,85 @@ class GPUModelRunner(
+         if hasattr(self, "_kv_block_zeroer"):
+             self._kv_block_zeroer.zero_block_ids(block_ids)
+ 
++    def _copy_conversation_blocks(self, copies: list[Any]) -> None:
++        """Copy exact conversation-cache blocks in-place."""
++        if not copies:
++            return
++
++        mamba_copies = [copy for copy in copies if copy.kind == "mamba_terminal"]
++        if mamba_copies and self.cache_config.mamba_cache_mode == "align":
++            mamba_utils.copy_mamba_terminal_blocks(
++                mamba_copies,
++                self.kv_cache_config,
++                self.compilation_config.static_forward_context,
++                self.model.get_mamba_state_copy_func(),
++                self._get_mamba_copy_bufs(),
++            )
++
++        copies_by_group: dict[int, tuple[list[int], list[int]]] = {}
++        for copy_op in copies:
++            if copy_op.kind != "full_attention_tail":
++                continue
++            src_ids, dst_ids = copies_by_group.setdefault(
++                copy_op.kv_cache_group_id,
++                ([], []),
++            )
++            src_ids.append(copy_op.src_block_id)
++            dst_ids.append(copy_op.dst_block_id)
++
++        if not copies_by_group:
++            return
++
++        for group in self._kv_cache_spec_attn_group_iterator():
++            group_copies = copies_by_group.get(group.kv_cache_group_id)
++            if group_copies is None:
++                continue
++            spec = group.kv_cache_spec
++            if not isinstance(spec, AttentionSpec):
++                continue
++
++            src_block_ids, dst_block_ids = group_copies
++            kernel_block_size = self._kernel_block_sizes[group.kv_cache_group_id]
++            block_ratio = spec.block_size // kernel_block_size
++            if block_ratio != 1:
++                src_block_ids = [
++                    block_id * block_ratio + offset
++                    for block_id in src_block_ids
++                    for offset in range(block_ratio)
++                ]
++                dst_block_ids = [
++                    block_id * block_ratio + offset
++                    for block_id in dst_block_ids
++                    for offset in range(block_ratio)
++                ]
++
++            src_indices = torch.tensor(
++                src_block_ids,
++                device=self.device,
++                dtype=torch.int64,
++            )
++            dst_indices = torch.tensor(
++                dst_block_ids,
++                device=self.device,
++                dtype=torch.int64,
++            )
++            block_dim = group.backend.get_kv_cache_block_dim(
++                kernel_block_size,
++                spec.num_kv_heads,
++                spec.head_size,
++                cache_dtype_str=self.cache_config.cache_dtype,
++            )
++            for layer_name in group.layer_names:
++                if layer_name in self.runner_only_attn_layers:
++                    continue
++                kv_cache = (
++                    self.compilation_config.static_forward_context[layer_name].kv_cache
++                )
++                if not isinstance(kv_cache, torch.Tensor):
++                    continue
++                src = kv_cache.index_select(block_dim, src_indices)
++                kv_cache.index_copy_(block_dim, dst_indices, src)
++
+     # Note: used for model runner override.
+     def _init_device_properties(self) -> None:
+         """Initialize attributes from torch.cuda.get_device_properties"""
+@@ -1068,6 +1147,19 @@ class GPUModelRunner(
+         The SamplingMetadata is updated and copied to the GPU if there is a
+         new/resumed/paused/finished request in the batch.
+         """
++        if (
++            self.cache_config.mamba_cache_mode == "align"
++            and scheduler_output.conversation_mamba_terminal_captures
++        ):
++            mamba_utils.capture_mamba_terminal_states(
++                scheduler_output,
++                self.kv_cache_config,
++                self.requests,
++                self.compilation_config.static_forward_context,
++                self.model.get_mamba_state_copy_func(),
++                self._get_mamba_copy_bufs(),
++            )
++
+         # Remove finished requests from the cached states.
+         for req_id in scheduler_output.finished_req_ids:
+             self.requests.pop(req_id, None)
+@@ -1088,6 +1180,8 @@ class GPUModelRunner(
+         # stale NaN/data from corrupting attention or SSM computation.
+         if scheduler_output.new_block_ids_to_zero:
+             self._zero_block_ids(scheduler_output.new_block_ids_to_zero)
++        if scheduler_output.conversation_block_copies:
++            self._copy_conversation_blocks(scheduler_output.conversation_block_copies)
+ 
+         # Free the cached encoder outputs.
+         for mm_hash in scheduler_output.free_encoder_mm_hashes:
+diff --git a/vllm/v1/worker/mamba_utils.py b/vllm/v1/worker/mamba_utils.py
+index c832389..4f236cd 100644
+--- a/vllm/v1/worker/mamba_utils.py
++++ b/vllm/v1/worker/mamba_utils.py
+@@ -133,6 +133,41 @@ def collect_mamba_copy_meta(
+     copy_bufs.offset = offset
+ 
+ 
++def collect_mamba_physical_copy_meta(
++    copy_bufs: MambaCopyBuffers,
++    kv_cache_config: KVCacheConfig,
++    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
++    mamba_group_id: int,
++    src_block_id: int,
++    dst_block_id: int,
++    accept_token_bias: int,
++    forward_context: dict[str, Any],
++) -> None:
++    src_ptrs_np = copy_bufs.src_ptrs.np
++    dst_ptrs_np = copy_bufs.dst_ptrs.np
++    sizes_np = copy_bufs.sizes.np
++    offset = copy_bufs.offset
++
++    block_ids = [src_block_id]
++    layer_names = kv_cache_config.kv_cache_groups[mamba_group_id].layer_names
++    for layer_name in layer_names:
++        attention = forward_context[layer_name]
++        kv_caches: list[torch.Tensor] = attention.kv_cache
++        for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
++            copy_spec = state_copy_func(
++                state,
++                block_ids,
++                0,
++                accept_token_bias + 1,
++            )
++            src_ptrs_np[offset] = copy_spec.start_addr
++            dst_ptrs_np[offset] = state[dst_block_id].data_ptr()
++            sizes_np[offset] = copy_spec.num_elements * state.element_size()
++            offset += 1
++
++    copy_bufs.offset = offset
++
++
+ def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
+     n = copy_bufs.offset
+     if n == 0:
+@@ -144,6 +179,66 @@ def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
+     )
+ 
+ 
++def capture_mamba_terminal_states(
++    scheduler_output: SchedulerOutput,
++    kv_cache_config: KVCacheConfig,
++    requests: dict[str, CachedRequestState],
++    forward_context: dict[str, Any],
++    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
++    copy_bufs: MambaCopyBuffers,
++):
++    captures = scheduler_output.conversation_mamba_terminal_captures or ()
++    if not captures:
++        return
++
++    copy_bufs.offset = 0
++    valid_group_ids = set(copy_bufs.mamba_group_ids)
++    for capture in captures:
++        assert capture.kv_cache_group_id in valid_group_ids
++        req_state = requests[capture.request_id]
++        collect_mamba_copy_meta(
++            copy_bufs,
++            kv_cache_config,
++            mamba_state_copy_funcs,
++            [capture.kv_cache_group_id],
++            capture.src_block_index,
++            capture.dst_block_index,
++            capture.accept_token_bias,
++            req_state,
++            forward_context,
++        )
++    do_mamba_copy_block(copy_bufs)
++
++
++def copy_mamba_terminal_blocks(
++    copies: list[Any],
++    kv_cache_config: KVCacheConfig,
++    forward_context: dict[str, Any],
++    mamba_state_copy_funcs: tuple[MambaStateCopyFunc, ...],
++    copy_bufs: MambaCopyBuffers,
++):
++    if not copies:
++        return
++
++    copy_bufs.offset = 0
++    valid_group_ids = set(copy_bufs.mamba_group_ids)
++    for copy in copies:
++        if copy.kind != "mamba_terminal":
++            continue
++        assert copy.kv_cache_group_id in valid_group_ids
++        collect_mamba_physical_copy_meta(
++            copy_bufs,
++            kv_cache_config,
++            mamba_state_copy_funcs,
++            copy.kv_cache_group_id,
++            copy.src_block_id,
++            copy.dst_block_id,
++            0,
++            forward_context,
++        )
++    do_mamba_copy_block(copy_bufs)
++
++
+ def preprocess_mamba(
+     scheduler_output: SchedulerOutput,
+     kv_cache_config: KVCacheConfig,
+-- 
+2.48.1
+

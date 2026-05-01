@@ -1,0 +1,26 @@
+# Local dependency checkouts. See checkouts.lock.json.
+/vllm-v0.20.0/
+/pipecat-core-code/
+/pocket-tts/
+/NeMo/
+
+# Model artifacts.
+/models/
+
+# Virtual environments and local tool caches.
+/.venv*/
+/.ruff_cache/
+/.playwright-mcp/
+__pycache__/
+*.py[cod]
+
+# Runtime artifacts.
+*.log
+*.pid
+conversation-prefix-cache*-results.json
+
+# Generated media. Keep the small speech fixtures used by smoke tests.
+/media/*
+!/media/cartesia-unicorn.wav
+!/media/cartesia-unicorn-followup.wav
+
