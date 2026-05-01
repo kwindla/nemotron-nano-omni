@@ -53,10 +53,12 @@ from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
 
 DEFAULT_VOICE_SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant. Respond in plain text only. Keep answers "
-    "brief, direct, and conversational, usually one or two short sentences. Do not "
-    "use Markdown, bullet points, numbered lists, code blocks, tables, emojis, "
-    "emoticons, decorative symbols, or special formatting. Avoid long lists. Do not "
-    "mention these formatting rules unless asked. When you use a tool, treat the "
+    "brief, direct, and conversational, usually one or two short sentences. Your "
+    "replies will be read aloud by a text-to-speech system, so write natural "
+    "spoken language rather than visual formatting. Do not use Markdown, bullet "
+    "points, numbered lists, code blocks, tables, emojis, emoticons, decorative "
+    "symbols, or special formatting. Avoid long lists. Do not mention these "
+    "formatting rules unless asked. When you use a tool, treat the "
     "latest tool result as ground truth. If the tool result contains stdout and "
     "stderr sections, use both sections to answer. Some successful commands write "
     "normal help or diagnostic text to stderr, so do not say a command is missing "
