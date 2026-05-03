@@ -3,9 +3,15 @@
     "vllm-v0.20.0": {
       "url": "https://github.com/vllm-project/vllm.git",
       "commit": "88d34c6409e9fb3c7b8ca0c04756f061d2099eb1",
-      "patches": [
-        "patches/vllm-nemotron-omni-conversation-cache.patch"
-      ]
+      "common_patches": [
+        "platforms/common/patches/vllm-nemotron-omni-conversation-cache.patch"
+      ],
+      "platform_patches": {
+        "rtx5090": [],
+        "dgx_spark": [
+          "platforms/dgx_spark/patches/vllm-dgx-spark-weight-streaming.patch"
+        ]
+      }
     },
     "pipecat-core-code": {
       "url": "git@github.com:pipecat-ai/pipecat.git",
@@ -24,4 +30,3 @@
     }
   }
 }
-

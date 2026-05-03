@@ -2,13 +2,20 @@ import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react-swc";
 
 const botUrl = process.env.PIPECAT_BOT_URL ?? "http://127.0.0.1:7860";
+const allowedHosts = (
+  process.env.VITE_ALLOWED_HOSTS ??
+  ".ngrok.app,.ngrok.dev,.ngrok-free.app,.ngrok-free.dev"
+)
+  .split(",")
+  .map((host) => host.trim())
+  .filter(Boolean);
 
 export default defineConfig({
   plugins: [react()],
   server: {
     host: "127.0.0.1",
     port: 5173,
-    allowedHosts: ["gb-client-khk.ngrok.app"],
+    allowedHosts,
     proxy: {
       "/api": {
         target: botUrl,
