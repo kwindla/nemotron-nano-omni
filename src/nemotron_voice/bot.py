@@ -47,7 +47,7 @@ from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
 from pipecat.processors.aggregators.llm_context import LLMContext
 from pipecat.processors.aggregators.llm_response_universal import (
-    LLMContextAggregatorPair,
+    LLMAssistantAggregator,
     LLMUserAggregator,
     LLMUserAggregatorParams,
 )
@@ -57,7 +57,11 @@ from pipecat.runner.types import RunnerArguments
 from pipecat.runner.utils import create_transport
 from nemotron_voice.services.kyutai.tts import PocketTTSService
 from nemotron_voice.services.nvidia.nemotron_omni import (
+    DEFAULT_AUDIO_PROMPT,
     DEFAULT_VOICE_SYSTEM_INSTRUCTION,
+    NEMOTRON_OMNI_INSTRUCT_DEFAULT_MAX_TOKENS,
+    NEMOTRON_OMNI_INSTRUCT_DEFAULT_TEMPERATURE,
+    NEMOTRON_OMNI_INSTRUCT_DEFAULT_TOP_K,
     NemotronOmniAudioLLMService,
 )
 from nemotron_voice.services.nvidia.nemotron_speech import NemotronSpeechWebSocketSTTService
@@ -113,6 +117,34 @@ def _ensure_file_logging():
     log_path = Path(os.getenv("NEMOTRON_OMNI_LOG", "nemotron-omni-audio-bot.log"))
     _FILE_LOGGER_ID = logger.add(log_path, level="DEBUG", backtrace=True, diagnose=False)
     logger.info(f"Debug log: {log_path.resolve()}")
+
+
+def _env_optional_float(name: str) -> float | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return float(value)
+
+
+def _env_optional_int(name: str) -> int | None:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return None
+    return int(value)
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return float(value)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return int(value)
 
 
 def _build_nemotron_speech_stt(*, audio_passthrough: bool = False) -> NemotronSpeechWebSocketSTTService:
@@ -318,13 +350,33 @@ class UserAudioContextCollector(FrameProcessor):
             await self._user_aggregator.push_context_frame()
 
 
+class AudioOnlyLLMUserAggregator(LLMUserAggregator):
+    """User-turn controller that does not append STT transcripts to LLM context.
+
+    Audio turns are committed separately by ``UserAudioContextCollector`` as a
+    single multimodal user message. Keeping the transcript out of the shared
+    context avoids duplicate user turns and prevents mixed audio/text suffix-only
+    requests from accidentally replaying stale audio turns.
+    """
+
+    async def _handle_transcription(self, frame: TranscriptionFrame):
+        return None
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     _ensure_file_logging()
     logger.info("Starting Nemotron Omni audio bot")
-    conversation_id = os.getenv("NEMOTRON_OMNI_CONVERSATION_ID") or (
-        f"pipecat-{uuid.uuid4().hex}"
+    conversation_cache_enabled = (
+        os.getenv("NEMOTRON_OMNI_ENABLE_CONVERSATION_CACHE", "1") != "0"
     )
-    logger.info(f"Using Nemotron Omni conversation_id={conversation_id}")
+    if conversation_cache_enabled:
+        conversation_id = os.getenv("NEMOTRON_OMNI_CONVERSATION_ID") or (
+            f"pipecat-{uuid.uuid4().hex}"
+        )
+        logger.info(f"Using Nemotron Omni conversation_id={conversation_id}")
+    else:
+        conversation_id = None
+        logger.info("Nemotron Omni conversation cache disabled for this bot session")
 
     rtvi = RTVIProcessor()
 
@@ -345,13 +397,21 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         ),
         bash_tool_event_sender=send_bash_tool_event,
         settings=NemotronOmniAudioLLMService.Settings(
+            model=os.getenv("NEMOTRON_OMNI_MODEL", "nemotron_3_nano_omni"),
             system_instruction=os.getenv(
                 _SYSTEM_INSTRUCTION_ENV, DEFAULT_VOICE_SYSTEM_INSTRUCTION
             ),
-            max_tokens=int(os.getenv("NEMOTRON_OMNI_MAX_TOKENS", "256")),
-            temperature=0.0,
-            top_k=1,
-            audio_prompt="Listen to the audio and respond to the spoken instruction.",
+            max_tokens=_env_int(
+                "NEMOTRON_OMNI_MAX_TOKENS",
+                NEMOTRON_OMNI_INSTRUCT_DEFAULT_MAX_TOKENS,
+            ),
+            temperature=_env_float(
+                "NEMOTRON_OMNI_TEMPERATURE",
+                NEMOTRON_OMNI_INSTRUCT_DEFAULT_TEMPERATURE,
+            ),
+            top_p=_env_optional_float("NEMOTRON_OMNI_TOP_P"),
+            top_k=_env_int("NEMOTRON_OMNI_TOP_K", NEMOTRON_OMNI_INSTRUCT_DEFAULT_TOP_K),
+            audio_prompt=os.getenv("NEMOTRON_OMNI_AUDIO_PROMPT", DEFAULT_AUDIO_PROMPT),
             chat_template_kwargs={"enable_thinking": False},
         ),
     )
@@ -360,19 +420,16 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     stt = _build_nemotron_speech_stt(audio_passthrough=False)
 
     context = LLMContext()
-    user_aggregator, assistant_aggregator = LLMContextAggregatorPair(
+    user_aggregator = AudioOnlyLLMUserAggregator(
         context,
-        user_params=LLMUserAggregatorParams(
+        params=LLMUserAggregatorParams(
             vad_analyzer=SileroVADAnalyzer(),
             user_turn_strategies=UserTurnStrategies(
-                stop=[
-                    AudioOnlySmartTurnStopStrategy(
-                        turn_analyzer=LocalSmartTurnAnalyzerV3()
-                    )
-                ]
+                stop=[AudioOnlySmartTurnStopStrategy(turn_analyzer=LocalSmartTurnAnalyzerV3())]
             ),
         ),
     )
+    assistant_aggregator = LLMAssistantAggregator(context)
     audio_collector = UserAudioContextCollector(
         context=context,
         user_aggregator=user_aggregator,

@@ -85,9 +85,7 @@ class PocketTTSService(TTSService):
 
     async def start(self, frame: StartFrame):
         await super().start(frame)
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-            self._owns_session = True
+        await self._ensure_session()
 
     async def stop(self, frame: EndFrame):
         await super().stop(frame)
@@ -103,6 +101,24 @@ class PocketTTSService(TTSService):
         if self._owns_session:
             self._session = None
 
+    async def _ensure_session(self):
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession()
+            self._owns_session = True
+
+    async def _reset_owned_session(self):
+        if not self._owns_session:
+            return
+        await self._close_session()
+        await self._ensure_session()
+
+    def _build_request_data(self, text: str) -> aiohttp.FormData:
+        data = aiohttp.FormData()
+        data.add_field("text", text)
+        if self._settings.voice:
+            data.add_field("voice_url", str(self._settings.voice))
+        return data
+
     @traced_tts
     async def run_tts(self, text: str, context_id: str) -> AsyncGenerator[Frame | None, None]:
         logger.debug(f"{self}: Generating Pocket TTS [{text}]")
@@ -111,52 +127,60 @@ class PocketTTSService(TTSService):
             yield None
             return
 
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-            self._owns_session = True
-
-        data = aiohttp.FormData()
-        data.add_field("text", text)
-        if self._settings.voice:
-            data.add_field("voice_url", str(self._settings.voice))
-
-        try:
-            timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=None)
-            async with self._session.post(
-                f"{self._base_url}/tts",
-                data=data,
-                timeout=timeout,
-            ) as response:
-                if response.status != 200:
-                    error = await response.text()
-                    yield ErrorFrame(
-                        error=(
-                            "Pocket TTS request failed "
-                            f"(status: {response.status}, error: {error})"
+        timeout = aiohttp.ClientTimeout(total=None, sock_connect=10, sock_read=None)
+        for attempt in range(2):
+            audio_started = False
+            await self._ensure_session()
+            try:
+                async with self._session.post(
+                    f"{self._base_url}/tts",
+                    data=self._build_request_data(text),
+                    timeout=timeout,
+                ) as response:
+                    if response.status != 200:
+                        error = await response.text()
+                        yield ErrorFrame(
+                            error=(
+                                "Pocket TTS request failed "
+                                f"(status: {response.status}, error: {error})"
+                            )
                         )
-                    )
+                        return
+
+                    await self.start_tts_usage_metrics(text)
+                    audio_bytes = 0
+
+                    async for frame in self._stream_wav_audio_frames_from_iterator(
+                        response.content.iter_chunked(self.chunk_size),
+                        context_id=context_id,
+                    ):
+                        if hasattr(frame, "audio"):
+                            audio_bytes += len(frame.audio)
+                            audio_started = True
+                        await self.stop_ttfb_metrics()
+                        yield frame
+
+                    output_sample_rate = self.sample_rate or POCKET_TTS_SAMPLE_RATE
+                    audio_ms = audio_bytes / (output_sample_rate * 2) * 1000
+                    logger.info(f"{self} local Pocket TTS stream complete: {audio_ms:.0f}ms audio")
                     return
-
-                await self.start_tts_usage_metrics(text)
-                audio_bytes = 0
-
-                async for frame in self._stream_wav_audio_frames_from_iterator(
-                    response.content.iter_chunked(self.chunk_size),
-                    context_id=context_id,
-                ):
-                    if hasattr(frame, "audio"):
-                        audio_bytes += len(frame.audio)
-                    await self.stop_ttfb_metrics()
-                    yield frame
-
-                output_sample_rate = self.sample_rate or POCKET_TTS_SAMPLE_RATE
-                audio_ms = audio_bytes / (output_sample_rate * 2) * 1000
-                logger.info(f"{self} local Pocket TTS stream complete: {audio_ms:.0f}ms audio")
-        except Exception as e:
-            logger.error(f"{self} local Pocket TTS error: {e}")
-            yield ErrorFrame(error=f"local Pocket TTS error: {e}")
-        finally:
-            await self.stop_ttfb_metrics()
+            except aiohttp.ServerDisconnectedError as e:
+                if attempt == 0 and not audio_started and self._owns_session:
+                    logger.warning(
+                        f"{self} local Pocket TTS disconnected before audio; "
+                        "recreating session and retrying once"
+                    )
+                    await self._reset_owned_session()
+                    continue
+                logger.error(f"{self} local Pocket TTS error: {e}")
+                yield ErrorFrame(error=f"local Pocket TTS error: {e}")
+                return
+            except Exception as e:
+                logger.error(f"{self} local Pocket TTS error: {e}")
+                yield ErrorFrame(error=f"local Pocket TTS error: {e}")
+                return
+            finally:
+                await self.stop_ttfb_metrics()
 
     async def _stream_wav_audio_frames_from_iterator(
         self,

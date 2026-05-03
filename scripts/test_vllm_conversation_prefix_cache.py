@@ -27,19 +27,95 @@ import requests
 
 
 ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_BASE_URL = "http://127.0.0.1:8000/v1"
-DEFAULT_MODEL = "nemotron_3_nano_omni"
-DEFAULT_AUDIO = ROOT / "media" / "cartesia-unicorn.wav"
-DEFAULT_LOG = ROOT / "vllm-nemotron-omni-cu132.log"
-DEFAULT_MODEL_PATH = (
-    ROOT / "models" / "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4"
+
+
+def _env_str(name: str, default: str) -> str:
+    return os.getenv(name, default)
+
+
+def _env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    return int(value) if value is not None else default
+
+
+def _env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    return float(value) if value is not None else default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() not in {"0", "false", "no", "off"}
+
+
+def _env_path(name: str, default: Path) -> Path:
+    value = os.getenv(name)
+    return Path(value) if value else default
+
+
+DEFAULT_BASE_URL = _env_str("NEMOTRON_VLLM_BASE_URL", "http://127.0.0.1:8000/v1")
+DEFAULT_MODEL = _env_str("NEMOTRON_VLLM_MODEL", "nemotron_3_nano_omni")
+DEFAULT_AUDIO = _env_path("NEMOTRON_AUDIO_FIXTURE", ROOT / "media" / "cartesia-unicorn.wav")
+DEFAULT_LOG = _env_path("NEMOTRON_VLLM_LOG", ROOT / "logs" / "vllm-prefix-cache.log")
+DEFAULT_MODEL_PATH = _env_path(
+    "NEMOTRON_MODEL_PATH",
+    ROOT / "models" / "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4",
 )
-DEFAULT_VLLM_PYTHON = ROOT / ".venv-vllm-0.20.0-cu132" / "bin" / "python3"
-DEFAULT_VLLM_BIN = ROOT / ".venv-vllm-0.20.0-cu132" / "bin" / "vllm"
+DEFAULT_VLLM_PYTHON = _env_path(
+    "NEMOTRON_VLLM_PYTHON",
+    ROOT / ".venv-vllm-0.20.0-cu132" / "bin" / "python3",
+)
+DEFAULT_VLLM_BIN = _env_path(
+    "NEMOTRON_VLLM_BIN",
+    ROOT / ".venv-vllm-0.20.0-cu132" / "bin" / "vllm",
+)
+DEFAULT_VLLM_SOURCE_DIR = _env_path(
+    "NEMOTRON_VLLM_SOURCE_DIR",
+    ROOT / "vllm-v0.20.0",
+)
+DEFAULT_GPU_MEMORY_UTILIZATION = _env_float(
+    "NEMOTRON_VLLM_GPU_MEMORY_UTILIZATION", 0.75
+)
+DEFAULT_MAX_MODEL_LEN = _env_int("NEMOTRON_VLLM_MAX_MODEL_LEN", 4096)
+DEFAULT_MAX_NUM_SEQS = _env_int("NEMOTRON_VLLM_MAX_NUM_SEQS", 1)
+DEFAULT_MAX_NUM_BATCHED_TOKENS = _env_int(
+    "NEMOTRON_VLLM_MAX_NUM_BATCHED_TOKENS", DEFAULT_MAX_MODEL_LEN
+)
+DEFAULT_LIMIT_MM_PER_PROMPT = _env_str(
+    "NEMOTRON_VLLM_LIMIT_MM_PER_PROMPT", '{"audio": 8}'
+)
+DEFAULT_ALLOWED_LOCAL_MEDIA_PATH = _env_str(
+    "NEMOTRON_VLLM_ALLOWED_LOCAL_MEDIA_PATH", "/"
+)
+DEFAULT_MM_ENCODER_ATTN_BACKEND = _env_str(
+    "NEMOTRON_VLLM_MM_ENCODER_ATTN_BACKEND", "TORCH_SDPA"
+)
+DEFAULT_SKIP_MM_PROFILING = _env_bool("NEMOTRON_VLLM_SKIP_MM_PROFILING", True)
+DEFAULT_ENFORCE_EAGER = _env_bool("NEMOTRON_VLLM_ENFORCE_EAGER", True)
+DEFAULT_REASONING_PARSER = _env_str(
+    "NEMOTRON_VLLM_REASONING_PARSER", "nemotron_v3"
+)
+DEFAULT_ENABLE_AUTO_TOOL_CHOICE = _env_bool(
+    "NEMOTRON_VLLM_ENABLE_AUTO_TOOL_CHOICE", True
+)
+DEFAULT_TOOL_CALL_PARSER = _env_str(
+    "NEMOTRON_VLLM_TOOL_CALL_PARSER", "qwen3_coder"
+)
+DEFAULT_MOE_BACKEND = _env_str("NEMOTRON_VLLM_MOE_BACKEND", "cutlass")
+DEFAULT_ENABLE_PREFIX_CACHING = _env_bool(
+    "NEMOTRON_VLLM_ENABLE_PREFIX_CACHING", True
+)
+DEFAULT_MAMBA_CACHE_MODE = _env_str("NEMOTRON_VLLM_MAMBA_CACHE_MODE", "align")
+DEFAULT_MAMBA_BACKEND = _env_str("NEMOTRON_VLLM_MAMBA_BACKEND", "triton")
+DEFAULT_ATTENTION_BACKEND = os.getenv("NEMOTRON_VLLM_ATTENTION_BACKEND")
+DEFAULT_KV_CACHE_MEMORY_BYTES = os.getenv("NEMOTRON_VLLM_KV_CACHE_MEMORY_BYTES")
 ATTACH_RE = re.compile(
     r"Attached conversation cache for (?P<cid>\S+) generation \S+ "
     r"tokens=(?P<tokens>\d+) copies=(?P<copies>\d+)"
 )
+ATTACH_SKIP_RE = re.compile(r"Conversation cache attach skipped for (?P<cid>\S+)\b")
 ERROR_RE = re.compile(r"\b(ERROR|Traceback|Exception|No free blocks|Failed to stage)\b")
 
 
@@ -147,9 +223,10 @@ def tail_text(path: Path, lines: int = 80) -> str:
 
 
 def vllm_command(args: argparse.Namespace) -> list[str]:
-    return [
+    command = [
         str(args.vllm_python),
-        str(args.vllm_bin),
+        "-m",
+        "vllm.entrypoints.cli.main",
         "serve",
         str(args.model_path),
         "--served-model-name",
@@ -164,37 +241,46 @@ def vllm_command(args: argparse.Namespace) -> list[str]:
         "--max-model-len",
         str(args.max_model_len),
         "--max-num-seqs",
-        "1",
+        str(args.max_num_seqs),
         "--max-num-batched-tokens",
-        str(args.max_model_len),
+        str(args.max_num_batched_tokens),
         "--limit-mm-per-prompt",
-        '{"audio": 8}',
+        args.limit_mm_per_prompt,
         "--allowed-local-media-path",
-        "/",
+        args.allowed_local_media_path,
         "--mm-encoder-attn-backend",
-        "TORCH_SDPA",
-        "--skip-mm-profiling",
-        "--enforce-eager",
+        args.mm_encoder_attn_backend,
         "--reasoning-parser",
-        "nemotron_v3",
-        "--enable-auto-tool-choice",
+        args.reasoning_parser,
         "--tool-call-parser",
-        "qwen3_coder",
+        args.tool_call_parser,
         "--moe-backend",
-        "cutlass",
-        "--enable-prefix-caching",
-        "--mamba-cache-mode",
-        "align",
-        "--mamba-backend",
-        "triton",
+        args.moe_backend,
     ]
+    if args.kv_cache_memory_bytes:
+        command.extend(["--kv-cache-memory-bytes", args.kv_cache_memory_bytes])
+    if args.attention_backend:
+        command.extend(["--attention-backend", args.attention_backend])
+    if args.skip_mm_profiling:
+        command.append("--skip-mm-profiling")
+    if args.enforce_eager:
+        command.append("--enforce-eager")
+    if args.enable_auto_tool_choice:
+        command.append("--enable-auto-tool-choice")
+    if args.enable_prefix_caching:
+        command.append("--enable-prefix-caching")
+    else:
+        command.append("--no-enable-prefix-caching")
+    if args.mamba_cache_mode:
+        command.extend(["--mamba-cache-mode", args.mamba_cache_mode])
+    if args.mamba_backend:
+        command.extend(["--mamba-backend", args.mamba_backend])
+    return command
 
 
 def start_vllm(args: argparse.Namespace) -> tuple[subprocess.Popen[bytes], Any]:
     if not args.vllm_python.exists():
         raise TestFailure(f"missing vLLM Python: {args.vllm_python}")
-    if not args.vllm_bin.exists():
-        raise TestFailure(f"missing vLLM entrypoint: {args.vllm_bin}")
     if not args.model_path.exists():
         raise TestFailure(f"missing model path: {args.model_path}")
 
@@ -202,6 +288,11 @@ def start_vllm(args: argparse.Namespace) -> tuple[subprocess.Popen[bytes], Any]:
     log_file = args.log.open("wb")
     env = os.environ.copy()
     env["PYTHONUNBUFFERED"] = "1"
+    env["PYTHONPATH"] = (
+        f"{args.vllm_source_dir}{os.pathsep}{env['PYTHONPATH']}"
+        if env.get("PYTHONPATH")
+        else str(args.vllm_source_dir)
+    )
     proc = subprocess.Popen(
         vllm_command(args),
         cwd=ROOT,
@@ -288,6 +379,7 @@ class VllmClient:
         cache_salt: str | None = None,
         max_tokens: int = 80,
         stream: bool = False,
+        extra_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": self.model,
@@ -306,6 +398,8 @@ class VllmClient:
         if stream:
             payload["stream"] = True
             payload["stream_options"] = {"include_usage": True}
+        if extra_payload:
+            payload.update(extra_payload)
         return payload
 
     def chat(
@@ -315,6 +409,7 @@ class VllmClient:
         conversation_id: str | None = None,
         cache_salt: str | None = None,
         max_tokens: int = 80,
+        extra_payload: dict[str, Any] | None = None,
     ) -> ChatResult:
         response = requests.post(
             f"{self.base_url}/chat/completions",
@@ -323,6 +418,7 @@ class VllmClient:
                 conversation_id=conversation_id,
                 cache_salt=cache_salt,
                 max_tokens=max_tokens,
+                extra_payload=extra_payload,
             ),
             timeout=self.timeout,
         )
@@ -342,23 +438,36 @@ class VllmClient:
         cache_salt: str | None = None,
         max_tokens: int = 96,
     ) -> ChatResult:
-        start = time.perf_counter()
-        response = requests.post(
-            f"{self.base_url}/chat/completions",
-            json=self.payload(
-                messages,
-                conversation_id=conversation_id,
-                cache_salt=cache_salt,
-                max_tokens=max_tokens,
-                stream=True,
-            ),
+        payload = self.payload(
+            messages,
+            conversation_id=conversation_id,
+            cache_salt=cache_salt,
+            max_tokens=max_tokens,
             stream=True,
-            timeout=self.timeout,
         )
-        if response.status_code != 200:
-            raise TestFailure(
-                f"stream request failed: HTTP {response.status_code}: {response.text[:1000]}"
+        for attempt in range(6):
+            start = time.perf_counter()
+            response = requests.post(
+                f"{self.base_url}/chat/completions",
+                json=payload,
+                stream=True,
+                timeout=self.timeout,
             )
+            if response.status_code == 200:
+                break
+            body = response.text[:1000]
+            response.close()
+            if (
+                response.status_code == 409
+                and conversation_id
+                and "already generating" in body.lower()
+                and attempt < 5
+            ):
+                time.sleep(0.25 * (attempt + 1))
+                continue
+            raise TestFailure(f"stream request failed: HTTP {response.status_code}: {body}")
+        else:
+            raise TestFailure("stream request retry loop exhausted unexpectedly")
 
         first_token_time: float | None = None
         usage: dict[str, Any] = {}
@@ -410,7 +519,7 @@ def assistant(text: str) -> dict[str, Any]:
 
 
 def audio_content(audio_path: Path, text: str) -> list[dict[str, Any]]:
-    audio_url = audio_path.resolve().as_uri()
+    audio_url = Path(os.path.abspath(audio_path)).as_uri()
     return [
         {"type": "audio_url", "audio_url": {"url": audio_url}, "uuid": audio_url},
         {"type": "text", "text": text},
@@ -424,6 +533,53 @@ def assert_attached(log_path: Path, offset: int, conversation_id: str) -> list[d
     if not lines:
         raise TestFailure(f"no conversation-cache attach log for {conversation_id}")
     return lines
+
+
+def assert_no_attach_skips(log_path: Path, offset: int, conversation_id: str) -> None:
+    log_text = read_log_from(log_path, offset)
+    for match in ATTACH_SKIP_RE.finditer(log_text):
+        if match.group("cid") == conversation_id:
+            raise TestFailure(
+                f"conversation cache attach skip detected for {conversation_id}"
+            )
+
+
+BASH_TOOL = {
+    "type": "function",
+    "function": {
+        "name": "bash",
+        "description": "Run a shell command and report the output.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {
+                    "type": "string",
+                    "description": "Shell command to execute.",
+                }
+            },
+            "required": ["command"],
+            "additionalProperties": False,
+        },
+    },
+}
+
+
+def extract_single_tool_call(result: ChatResult) -> dict[str, Any]:
+    if not result.raw:
+        raise TestFailure("tool-call response is missing the raw payload")
+    message = result.raw["choices"][0]["message"]
+    tool_calls = message.get("tool_calls") or []
+    if len(tool_calls) != 1:
+        raise TestFailure(f"expected exactly one tool call, got: {message!r}")
+    return tool_calls[0]
+
+
+def tool_message(tool_call_id: str, content: str) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "tool_call_id": tool_call_id,
+        "content": content,
+    }
 
 
 def run_equivalence_test(client: VllmClient, log_path: Path) -> TestResult:
@@ -620,6 +776,97 @@ def run_hard_mamba_context_test(client: VllmClient, log_path: Path) -> TestResul
         details={
             "first_output": normalize_text(first.content),
             "output": cached_norm,
+            "attach": attach,
+        },
+    )
+
+
+def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestResult:
+    name = "tool_multiturn_suffix_only_cache"
+    offset = log_offset(log_path)
+    cid = f"it-tool-{uuid.uuid4().hex[:8]}"
+    salt = cid
+    tool_payload = {"tools": [BASH_TOOL], "tool_choice": "auto"}
+
+    turn1_first = client.chat(
+        [user("Use the bash tool to run pwd and report the output only.")],
+        conversation_id=cid,
+        cache_salt=salt,
+        max_tokens=64,
+        extra_payload=tool_payload,
+    )
+    turn1_tool_call = extract_single_tool_call(turn1_first)
+    turn1_final = client.chat(
+        [tool_message(turn1_tool_call["id"], "/home/khkramer/src/nemotron-nano-omni\n")],
+        conversation_id=cid,
+        cache_salt=salt,
+        max_tokens=32,
+        extra_payload={
+            **tool_payload,
+            "conversation_require_cache": True,
+        },
+    )
+
+    turn2_first = client.chat(
+        [
+            user(
+                "Use the bash tool to run basename "
+                "/home/khkramer/src/nemotron-nano-omni and report the output only."
+            )
+        ],
+        conversation_id=cid,
+        cache_salt=salt,
+        max_tokens=64,
+        extra_payload={
+            **tool_payload,
+            "conversation_require_cache": True,
+        },
+    )
+    turn2_tool_call = extract_single_tool_call(turn2_first)
+    turn2_final = client.chat(
+        [tool_message(turn2_tool_call["id"], "nemotron-nano-omni\n")],
+        conversation_id=cid,
+        cache_salt=salt,
+        max_tokens=24,
+        extra_payload={
+            **tool_payload,
+            "conversation_require_cache": True,
+        },
+    )
+
+    turn3_final = client.chat(
+        [user("What exact token did the previous command print? Reply with that token only.")],
+        conversation_id=cid,
+        cache_salt=salt,
+        max_tokens=16,
+        extra_payload={
+            **tool_payload,
+            "conversation_require_cache": True,
+        },
+    )
+
+    attach = assert_attached(log_path, offset, cid)
+    assert_no_attach_skips(log_path, offset, cid)
+    if len(attach) < 4:
+        raise TestFailure(
+            f"expected at least 4 attach events for tool turns, saw {len(attach)}"
+        )
+
+    if "/home/khkramer/src/nemotron-nano-omni" not in turn1_final.content:
+        raise TestFailure(f"turn 1 tool follow-up output is wrong: {turn1_final.content!r}")
+    if "nemotron-nano-omni" not in turn2_final.content:
+        raise TestFailure(f"turn 2 tool follow-up output is wrong: {turn2_final.content!r}")
+    if "nemotron-nano-omni" not in turn3_final.content:
+        raise TestFailure(f"turn 3 suffix-only output is wrong: {turn3_final.content!r}")
+
+    return TestResult(
+        name=name,
+        ok=True,
+        details={
+            "turn1_output": normalize_text(turn1_final.content),
+            "turn2_output": normalize_text(turn2_final.content),
+            "turn3_output": normalize_text(turn3_final.content),
+            "attach_count": len(attach),
             "attach": attach,
         },
     )
@@ -903,10 +1150,78 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--model-path", type=Path, default=DEFAULT_MODEL_PATH)
     parser.add_argument("--vllm-python", type=Path, default=DEFAULT_VLLM_PYTHON)
     parser.add_argument("--vllm-bin", type=Path, default=DEFAULT_VLLM_BIN)
+    parser.add_argument("--vllm-source-dir", type=Path, default=DEFAULT_VLLM_SOURCE_DIR)
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
-    parser.add_argument("--gpu-memory-utilization", type=float, default=0.75)
-    parser.add_argument("--max-model-len", type=int, default=4096)
+    parser.add_argument(
+        "--gpu-memory-utilization",
+        type=float,
+        default=DEFAULT_GPU_MEMORY_UTILIZATION,
+    )
+    parser.add_argument("--max-model-len", type=int, default=DEFAULT_MAX_MODEL_LEN)
+    parser.add_argument("--max-num-seqs", type=int, default=DEFAULT_MAX_NUM_SEQS)
+    parser.add_argument(
+        "--max-num-batched-tokens",
+        type=int,
+        default=DEFAULT_MAX_NUM_BATCHED_TOKENS,
+    )
+    parser.add_argument(
+        "--limit-mm-per-prompt",
+        default=DEFAULT_LIMIT_MM_PER_PROMPT,
+    )
+    parser.add_argument(
+        "--allowed-local-media-path",
+        default=DEFAULT_ALLOWED_LOCAL_MEDIA_PATH,
+    )
+    parser.add_argument(
+        "--mm-encoder-attn-backend",
+        default=DEFAULT_MM_ENCODER_ATTN_BACKEND,
+    )
+    parser.add_argument(
+        "--skip-mm-profiling",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_SKIP_MM_PROFILING,
+    )
+    parser.add_argument(
+        "--enforce-eager",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ENFORCE_EAGER,
+    )
+    parser.add_argument(
+        "--reasoning-parser",
+        default=DEFAULT_REASONING_PARSER,
+    )
+    parser.add_argument(
+        "--enable-auto-tool-choice",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ENABLE_AUTO_TOOL_CHOICE,
+    )
+    parser.add_argument(
+        "--tool-call-parser",
+        default=DEFAULT_TOOL_CALL_PARSER,
+    )
+    parser.add_argument("--moe-backend", default=DEFAULT_MOE_BACKEND)
+    parser.add_argument(
+        "--enable-prefix-caching",
+        action=argparse.BooleanOptionalAction,
+        default=DEFAULT_ENABLE_PREFIX_CACHING,
+    )
+    parser.add_argument(
+        "--mamba-cache-mode",
+        default=DEFAULT_MAMBA_CACHE_MODE,
+    )
+    parser.add_argument(
+        "--mamba-backend",
+        default=DEFAULT_MAMBA_BACKEND,
+    )
+    parser.add_argument(
+        "--attention-backend",
+        default=DEFAULT_ATTENTION_BACKEND,
+    )
+    parser.add_argument(
+        "--kv-cache-memory-bytes",
+        default=DEFAULT_KV_CACHE_MEMORY_BYTES,
+    )
     parser.add_argument("--audio", type=Path, default=DEFAULT_AUDIO)
     parser.add_argument("--timeout", type=float, default=300.0)
     parser.add_argument("--health-timeout", type=float, default=360.0)
@@ -952,6 +1267,7 @@ def main() -> int:
             (run_equivalence_test, (client, args.log)),
             (run_text_suffix_only_equivalence_test, (client, args.log)),
             (run_hard_mamba_context_test, (client, args.log)),
+            (run_tool_multiturn_cache_test, (client, args.log)),
         ]
         if not args.skip_audio:
             tests.append((run_audio_prefix_test, (client, args.log, args.audio)))

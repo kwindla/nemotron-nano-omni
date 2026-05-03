@@ -16,13 +16,17 @@ import asyncio
 import audioop
 import base64
 import copy
+import hashlib
 import io
 import json
 import os
+import re
+import shlex
 import time
 import wave
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import aiohttp
@@ -69,11 +73,32 @@ DEFAULT_VOICE_SYSTEM_INSTRUCTION = (
     "terminal markup, or long command output literally unless the user explicitly "
     "asks you to. Interpret the result and explain the useful meaning briefly. "
     "For cowthink or cowsay-style output, focus on the message inside the bubble "
-    "and say that the command rendered it as ASCII art. The user may ask about "
-    "the Unix tool cowthink; use the bash tool to inspect it when needed."
+    "and say that the command rendered it as ASCII art. Only use the bash tool "
+    "when the user's latest request explicitly asks you to inspect or operate on "
+    "the local machine, run a command, or when local inspection is genuinely "
+    "necessary to answer correctly. If the user explicitly asks you to use the "
+    "bash tool, run a command, or report command output, you must call the bash "
+    "tool and answer from that result rather than from memory. After you receive "
+    "a bash tool result, do not call the same command again unless the user asks "
+    "for a rerun or the situation has changed. Do not use the bash tool to echo, "
+    "printf, paraphrase, or draft an answer you could simply say directly. The "
+    "tool is for real command execution and explicit user-requested command "
+    "output, not for generating prose. The user may ask about the Unix tool "
+    "cowthink; use the bash tool to inspect it when needed."
 )
 
 BASH_TOOL_NAME = "run_bash"
+DEFAULT_AUDIO_PROMPT = (
+    "Listen to the audio and respond to the spoken instruction. If the user "
+    "explicitly asks you to use the bash tool, run a command, inspect the local "
+    "machine, or report command output, you must call run_bash and answer from "
+    "the tool result. Otherwise answer directly without tools unless local "
+    "inspection is genuinely needed. Never use bash just to echo or paraphrase "
+    "an answer you could say directly."
+)
+NEMOTRON_OMNI_INSTRUCT_DEFAULT_TEMPERATURE = 0.2
+NEMOTRON_OMNI_INSTRUCT_DEFAULT_MAX_TOKENS = 1024
+NEMOTRON_OMNI_INSTRUCT_DEFAULT_TOP_K = 1
 BASH_TOOL_DEFINITION: dict[str, Any] = {
     "type": "function",
     "function": {
@@ -85,7 +110,13 @@ BASH_TOOL_DEFINITION: dict[str, Any] = {
             "stdout is wrapped in <stdout>...</stdout> and stderr is wrapped in "
             "<stderr>...</stderr>. Some programs write normal help or diagnostic "
             "text to stderr even when they succeed. Use this when the user asks "
-            "you to inspect or operate on the local machine. Examples: use "
+            "you to inspect or operate on the local machine. If the user "
+            "explicitly asks you to use bash, run a command, or report command "
+            "output, call this tool instead of answering from memory. Do not call "
+            "the exact same command again in the same assistant turn unless the "
+            "tool result shows that a rerun is required. Do not use this tool to "
+            "echo, printf, paraphrase, or draft natural-language answers that you "
+            "could say directly. Examples: use "
             "`git branch --show-current` to see the current git branch; use "
             "`find . -maxdepth 1 -type f | wc -l` to count files in this directory; "
             "use `find . -type f | wc -l` to count files total in this project."
@@ -209,16 +240,16 @@ class NemotronOmniAudioLLMService(LLMService):
         default_settings = self.Settings(
             model="nemotron_3_nano_omni",
             system_instruction=DEFAULT_VOICE_SYSTEM_INSTRUCTION,
-            temperature=0.0,
-            max_tokens=256,
+            temperature=NEMOTRON_OMNI_INSTRUCT_DEFAULT_TEMPERATURE,
+            max_tokens=NEMOTRON_OMNI_INSTRUCT_DEFAULT_MAX_TOKENS,
             top_p=None,
-            top_k=1,
+            top_k=NEMOTRON_OMNI_INSTRUCT_DEFAULT_TOP_K,
             frequency_penalty=None,
             presence_penalty=None,
             seed=None,
             filter_incomplete_user_turns=False,
             user_turn_completion_config=None,
-            audio_prompt="Listen to the audio and respond to the spoken instruction.",
+            audio_prompt=DEFAULT_AUDIO_PROMPT,
             chat_template_kwargs={"enable_thinking": False},
             extra={},
         )
@@ -256,6 +287,10 @@ class NemotronOmniAudioLLMService(LLMService):
         self._session: aiohttp.ClientSession | None = None
         self._generation_task: asyncio.Task | None = None
         self._conversation_cache_committed = False
+        self._canonical_messages: list[dict[str, Any]] = []
+        trace_dir = os.getenv("NEMOTRON_OMNI_TRACE_DIR")
+        self._trace_dir = Path(trace_dir) if trace_dir else None
+        self._top_level_request_seq = 0
 
         self._sample_rate = 16000
         self._num_channels = 1
@@ -343,10 +378,15 @@ class NemotronOmniAudioLLMService(LLMService):
             logger.debug(f"{self}: ignoring empty LLM context")
             return
 
+        canonical_messages = self._canonical_messages_from_context(messages)
+        if canonical_messages is None:
+            logger.debug(f"{self}: ignoring LLM context without a latest user message")
+            return
+
         await self._cancel_generation_task()
         self._reset_audio_buffers()
 
-        payload = self._build_payload_from_context_messages(messages)
+        payload = self._build_payload_from_messages(canonical_messages)
         self._generation_task = self.create_task(
             self._run_completion_payload(
                 payload,
@@ -554,9 +594,7 @@ class NemotronOmniAudioLLMService(LLMService):
         ):
             return messages, False
 
-        latest_user = self._latest_user_message(messages, require_audio=True)
-        if latest_user is None:
-            latest_user = self._latest_user_message(messages, require_audio=False)
+        latest_user = self._latest_user_message(messages)
         if latest_user is None:
             logger.warning(
                 f"{self}: suffix-only conversation mode found no user message; "
@@ -573,13 +611,9 @@ class NemotronOmniAudioLLMService(LLMService):
     def _latest_user_message(
         self,
         messages: list[dict[str, Any]],
-        *,
-        require_audio: bool,
     ) -> dict[str, Any] | None:
         for message in reversed(messages):
             if message.get("role") != "user":
-                continue
-            if require_audio and self._count_audio_parts([message]) == 0:
                 continue
             return copy.deepcopy(message)
         return None
@@ -632,6 +666,8 @@ class NemotronOmniAudioLLMService(LLMService):
             converted["tool_calls"] = message["tool_calls"]
         if "tool_call_id" in message:
             converted["tool_call_id"] = message["tool_call_id"]
+        if "name" in message:
+            converted["name"] = message["name"]
 
         content = message.get("content")
         if isinstance(content, str) or content is None:
@@ -688,6 +724,132 @@ class NemotronOmniAudioLLMService(LLMService):
             count += sum(1 for item in content if item.get("type") == "audio_url")
         return count
 
+    def _message_role_summary(self, messages: list[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for message in messages:
+            role = str(message.get("role") or "?")
+            audio_parts = self._count_audio_parts([message])
+            if audio_parts:
+                parts.append(f"{role}[audio={audio_parts}]")
+            elif message.get("tool_calls"):
+                parts.append(f"{role}[tool_calls]")
+            elif role == "tool":
+                parts.append(f"{role}[result]")
+            else:
+                parts.append(role)
+        return ",".join(parts)
+
+    def _canonical_messages_from_context(
+        self,
+        context_messages: list[Any],
+    ) -> list[dict[str, Any]] | None:
+        latest_user_message: dict[str, Any] | None = None
+        for message in context_messages:
+            converted = self._convert_context_message(message)
+            if converted is None or converted.get("role") != "user":
+                continue
+            latest_user_message = converted
+
+        if latest_user_message is None:
+            return None
+
+        canonical_messages = self._with_system_message(self._canonical_messages)
+        if not canonical_messages or canonical_messages[-1] != latest_user_message:
+            canonical_messages.append(latest_user_message)
+        return canonical_messages
+
+    def _commit_canonical_messages(
+        self,
+        payload: dict[str, Any],
+        *,
+        assistant_text: str,
+    ) -> None:
+        full_messages = payload.get("_conversation_full_messages")
+        if not isinstance(full_messages, list):
+            logger.warning(f"{self}: cannot commit canonical messages without full messages")
+            return
+
+        committed_messages = self._with_system_message(full_messages)
+        if assistant_text:
+            committed_messages.append({"role": "assistant", "content": assistant_text})
+        self._canonical_messages = committed_messages
+
+    def _with_system_message(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        normalized_messages = copy.deepcopy(messages)
+        if not self._settings.system_instruction:
+            return normalized_messages
+
+        system_message = {
+            "role": "system",
+            "content": self._settings.system_instruction,
+        }
+        if normalized_messages and normalized_messages[0].get("role") == "system":
+            normalized_messages[0] = system_message
+            return normalized_messages
+        return [system_message, *normalized_messages]
+
+    def _trace_request_id(self, top_level_request_seq: int, attempt_num: int) -> str:
+        conversation_part = self._conversation_id or "no-conversation"
+        return (
+            f"nemotron-{conversation_part}-turn-{top_level_request_seq:03d}-"
+            f"attempt-{attempt_num:02d}"
+        )
+
+    def _trace_json_value(self, value: Any) -> Any:
+        if isinstance(value, dict):
+            if (
+                set(value.keys()) == {"url"}
+                and isinstance(value["url"], str)
+                and value["url"].startswith("data:audio/")
+            ):
+                url = value["url"]
+                _, _, encoded = url.partition(",")
+                digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()
+                return {
+                    "url": f"<data-audio-base64 sha256={digest} chars={len(encoded)}>",
+                }
+            return {
+                str(key): self._trace_json_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, list):
+            return [self._trace_json_value(item) for item in value]
+        return value
+
+    def _write_trace_file(
+        self,
+        *,
+        trace_id: str,
+        phase: str,
+        payload: dict[str, Any],
+    ) -> None:
+        if self._trace_dir is None:
+            return
+        try:
+            self._trace_dir.mkdir(parents=True, exist_ok=True)
+            trace_path = self._trace_dir / f"{trace_id}.{phase}.json"
+            trace_payload = {
+                "trace_id": trace_id,
+                "phase": phase,
+                "timestamp": time.time(),
+                **payload,
+            }
+            trace_path.write_text(
+                json.dumps(
+                    self._trace_json_value(trace_payload),
+                    indent=2,
+                    ensure_ascii=True,
+                    sort_keys=True,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+        except Exception as exc:
+            logger.warning(f"{self}: failed to write trace file for {trace_id}: {exc}")
+
     async def _run_audio_completion(self, audio: bytes, sample_rate: int, num_channels: int):
         payload = self._build_payload(self._wav_data_url(audio, sample_rate, num_channels))
         await self._run_completion_payload(
@@ -711,6 +873,11 @@ class NemotronOmniAudioLLMService(LLMService):
         output_text_parts: list[str] = []
         tool_rounds = 0
         completed = False
+        recovered_from_cache_miss = False
+        seen_tool_results_by_signature: dict[tuple[str, str], str] = {}
+        final_assistant_text = ""
+        self._top_level_request_seq += 1
+        top_level_request_seq = self._top_level_request_seq
 
         try:
             await self.push_frame(LLMFullResponseStartFrame())
@@ -735,12 +902,44 @@ class NemotronOmniAudioLLMService(LLMService):
 
             current_payload = copy.deepcopy(payload)
             retried_full_context = False
+            attempt_num = 0
             while True:
+                attempt_num += 1
+                trace_id = self._trace_request_id(top_level_request_seq, attempt_num)
+                attempt_messages = current_payload.get("messages")
+                if not isinstance(attempt_messages, list):
+                    attempt_messages = []
+                logger.debug(
+                    f"{self}: completion attempt {attempt_num} "
+                    f"messages={len(attempt_messages)} "
+                    f"roles={self._message_role_summary(attempt_messages)} "
+                    f"audio_parts={self._count_audio_parts(attempt_messages)} "
+                    f"require_cache={bool(current_payload.get('conversation_require_cache'))}"
+                )
+                http_payload = self._http_payload(current_payload)
+                self._write_trace_file(
+                    trace_id=trace_id,
+                    phase="client-request",
+                    payload={
+                        "request_description": request_description,
+                        "conversation_id": self._conversation_id,
+                        "suffix_only_conversation": self._suffix_only_conversation,
+                        "conversation_cache_committed": self._conversation_cache_committed,
+                        "messages_role_summary": self._message_role_summary(
+                            attempt_messages
+                        ),
+                        "http_payload": http_payload,
+                        "conversation_full_messages": current_payload.get(
+                            "_conversation_full_messages"
+                        ),
+                    },
+                )
                 try:
                     result = await self._stream_completion_pass(
                         current_payload,
-                        headers=headers,
+                        headers={**headers, "X-Request-Id": trace_id},
                         first_token=first_token,
+                        trace_id=trace_id,
                     )
                 except ConversationCacheMissError:
                     if retried_full_context:
@@ -748,6 +947,7 @@ class NemotronOmniAudioLLMService(LLMService):
                     full_payload = self._full_context_retry_payload(current_payload)
                     if full_payload is None:
                         raise
+                    recovered_from_cache_miss = True
                     retried_full_context = True
                     current_payload = full_payload
                     logger.info(
@@ -758,10 +958,9 @@ class NemotronOmniAudioLLMService(LLMService):
                 first_token = result.first_token
                 if result.output_text:
                     output_text_parts.append(result.output_text)
-                if self._conversation_id:
-                    self._conversation_cache_committed = True
 
                 if not result.tool_calls:
+                    final_assistant_text = result.output_text
                     break
                 if not self._enable_bash_tool:
                     logger.warning(
@@ -780,14 +979,29 @@ class NemotronOmniAudioLLMService(LLMService):
                     f"{self}: executing {len(result.tool_calls)} tool call(s) "
                     f"for round {tool_rounds}"
                 )
-                tool_messages = await self._execute_tool_calls(result.tool_calls)
+                tool_messages = await self._execute_tool_calls(
+                    result.tool_calls,
+                    seen_tool_results_by_signature=seen_tool_results_by_signature,
+                )
                 current_payload = self._payload_after_tool_calls(
                     current_payload,
-                    result.tool_calls,
-                    tool_messages,
+                    assistant_text=result.output_text,
+                    tool_calls=result.tool_calls,
+                    tool_messages=tool_messages,
                 )
 
             completed = True
+            self._commit_canonical_messages(
+                current_payload,
+                assistant_text=final_assistant_text,
+            )
+            if self._conversation_id:
+                self._conversation_cache_committed = not recovered_from_cache_miss
+                if recovered_from_cache_miss:
+                    logger.debug(
+                        f"{self}: keeping suffix-only conversation mode disabled "
+                        "for the next turn after cache-miss recovery"
+                    )
             logger.debug(
                 f"{self}: completed response in {time.perf_counter() - started_at:.3f}s: "
                 f"{''.join(output_text_parts)!r}"
@@ -812,6 +1026,7 @@ class NemotronOmniAudioLLMService(LLMService):
         *,
         headers: dict[str, str],
         first_token: bool,
+        trace_id: str,
     ) -> ChatCompletionPassResult:
         output_text = ""
         tool_calls_by_index: dict[int, dict[str, Any]] = {}
@@ -823,6 +1038,14 @@ class NemotronOmniAudioLLMService(LLMService):
         ) as response:
             if response.status != 200:
                 error_text = await response.text()
+                self._write_trace_file(
+                    trace_id=trace_id,
+                    phase="client-error",
+                    payload={
+                        "status": response.status,
+                        "response_text": error_text,
+                    },
+                )
                 if self._is_conversation_cache_miss(response.status, error_text):
                     raise ConversationCacheMissError(error_text)
                 raise RuntimeError(
@@ -850,7 +1073,8 @@ class NemotronOmniAudioLLMService(LLMService):
 
                 for choice in chunk.get("choices") or []:
                     delta = choice.get("delta") or {}
-                    for tool_call_delta in delta.get("tool_calls") or []:
+                    tool_call_deltas = delta.get("tool_calls") or []
+                    for tool_call_delta in tool_call_deltas:
                         self._merge_tool_call_delta(tool_calls_by_index, tool_call_delta)
 
                     text = delta.get("content") or ""
@@ -862,11 +1086,21 @@ class NemotronOmniAudioLLMService(LLMService):
                     output_text += text
                     await self._push_llm_text(text)
 
-        return ChatCompletionPassResult(
+        result = ChatCompletionPassResult(
             output_text=output_text,
             tool_calls=self._finalize_tool_calls(tool_calls_by_index),
             first_token=first_token,
         )
+        self._write_trace_file(
+            trace_id=trace_id,
+            phase="client-response",
+            payload={
+                "output_text": result.output_text,
+                "tool_calls": result.tool_calls,
+                "first_token_pending": result.first_token,
+            },
+        )
+        return result
 
     @staticmethod
     def _http_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -954,51 +1188,126 @@ class NemotronOmniAudioLLMService(LLMService):
     def _payload_after_tool_calls(
         self,
         payload: dict[str, Any],
+        assistant_text: str,
         tool_calls: list[dict[str, Any]],
         tool_messages: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        assistant_tool_call_message = self._assistant_tool_call_message(
+            tool_calls,
+            assistant_text=assistant_text,
+        )
         next_payload = copy.deepcopy(payload)
-        next_payload["messages"] = [
-            *copy.deepcopy(payload["messages"]),
-            self._assistant_tool_call_message(tool_calls),
-            *tool_messages,
-        ]
         full_messages = next_payload.get("_conversation_full_messages")
         if isinstance(full_messages, list):
             next_payload["_conversation_full_messages"] = [
                 *copy.deepcopy(full_messages),
-                self._assistant_tool_call_message(tool_calls),
+                assistant_tool_call_message,
                 *copy.deepcopy(tool_messages),
             ]
-        next_payload.pop("tools", None)
-        next_payload.pop("tool_choice", None)
+        if self._conversation_id:
+            # After a successful tool-call round, vLLM has already committed the
+            # prefix through the assistant tool-call message. Send only the new
+            # tool-result suffix and require cache so we do not duplicate the
+            # user/tool-call messages inside the same top-level turn.
+            next_payload["messages"] = copy.deepcopy(tool_messages)
+            next_payload["conversation_require_cache"] = True
+        else:
+            next_payload["messages"] = [
+                *copy.deepcopy(payload["messages"]),
+                assistant_tool_call_message,
+                *copy.deepcopy(tool_messages),
+            ]
+        # Keep tool definitions stable across tool-followup requests. vLLM feeds
+        # `tools` into the chat template, so removing them shrinks the prompt and
+        # breaks exact conversation-cache attach on the next round.
         return next_payload
 
     @staticmethod
     def _assistant_tool_call_message(
-        tool_calls: list[dict[str, Any]]
+        tool_calls: list[dict[str, Any]],
+        *,
+        assistant_text: str,
     ) -> dict[str, Any]:
+        content: str | None = assistant_text or None
         return {
             "role": "assistant",
-            "content": None,
+            "content": content,
             "tool_calls": copy.deepcopy(tool_calls),
         }
 
     async def _execute_tool_calls(
         self,
         tool_calls: list[dict[str, Any]],
+        *,
+        seen_tool_results_by_signature: dict[tuple[str, str], str] | None = None,
     ) -> list[dict[str, Any]]:
         tool_messages: list[dict[str, Any]] = []
+        signature_results = seen_tool_results_by_signature or {}
         for tool_call in tool_calls:
-            result = await self._execute_tool_call(tool_call)
+            signature = self._tool_call_signature(tool_call)
+            if signature and signature in signature_results:
+                result = self._duplicate_tool_result(signature_results[signature])
+                logger.debug(
+                    f"{self}: suppressing duplicate tool call within one user turn: "
+                    f"{signature[0]} {signature[1]!r}"
+                )
+                await self._send_bash_tool_event(
+                    {
+                        "phase": "duplicate_suppressed",
+                        "guardrail_triggered": True,
+                        "guardrail_kind": "duplicate_tool_call",
+                        "guardrail_reason": "exact_duplicate_command",
+                        "tool_call_id": tool_call.get("id") or "call_0",
+                        "name": signature[0],
+                        "signature": signature[1],
+                    }
+                )
+            else:
+                result = await self._execute_tool_call(tool_call)
+                if signature:
+                    signature_results[signature] = result
             tool_messages.append(
                 {
                     "role": "tool",
                     "tool_call_id": tool_call.get("id") or "call_0",
+                    "name": (tool_call.get("function") or {}).get("name") or "",
                     "content": result,
                 }
             )
         return tool_messages
+
+    @staticmethod
+    def _tool_call_signature(
+        tool_call: dict[str, Any]
+    ) -> tuple[str, str] | None:
+        function = tool_call.get("function") or {}
+        name = function.get("name") or ""
+        if name != BASH_TOOL_NAME:
+            return None
+
+        arguments_text = function.get("arguments") or "{}"
+        try:
+            arguments = json.loads(arguments_text)
+        except json.JSONDecodeError:
+            return None
+
+        code = arguments.get("code")
+        if not isinstance(code, str):
+            return None
+
+        normalized_code = code.strip()
+        if not normalized_code:
+            return None
+        return name, normalized_code
+
+    @staticmethod
+    def _duplicate_tool_result(previous_result: str) -> str:
+        return (
+            "[tool policy] Exact duplicate tool call suppressed. "
+            "Reuse the prior result below instead of calling the same command "
+            "again.\n"
+            f"{previous_result}"
+        )
 
     async def _execute_tool_call(self, tool_call: dict[str, Any]) -> str:
         function = tool_call.get("function") or {}
@@ -1026,7 +1335,49 @@ class NemotronOmniAudioLLMService(LLMService):
                 error="Missing required string argument: code",
                 raw_arguments=arguments_text,
             )
+        if self._is_prose_echo_command(code):
+            logger.debug(
+                f"{self}: suppressing non-instrumental bash tool call: {code!r}"
+            )
+            await self._send_bash_tool_event(
+                {
+                    "phase": "policy_rejected",
+                    "guardrail_triggered": True,
+                    "guardrail_kind": "non_instrumental_bash_tool_use",
+                    "guardrail_reason": "echo_or_printf_prose",
+                    "tool_call_id": tool_call.get("id") or "call_0",
+                    "name": name,
+                    "code": code,
+                }
+            )
+            return (
+                "[tool policy] Do not use bash to echo, printf, or paraphrase an "
+                "answer you could say directly. The bash tool is only for real "
+                "command execution or explicit user-requested command output. "
+                "Answer the user directly without further tool use."
+            )
         return await self._run_bash_tool(code, tool_call_id=tool_call.get("id") or "call_0")
+
+    @staticmethod
+    def _is_prose_echo_command(code: str) -> bool:
+        stripped = code.strip()
+        if not stripped or any(token in stripped for token in ("&&", "||", "|", ";", "$(", "`")):
+            return False
+        try:
+            argv = shlex.split(stripped)
+        except ValueError:
+            return False
+        if not argv or argv[0] not in {"echo", "printf"}:
+            return False
+        payload_tokens = argv[1:]
+        if not payload_tokens:
+            return False
+        payload_text = " ".join(token.rstrip("\\n") for token in payload_tokens).strip()
+        if not payload_text:
+            return False
+        word_count = len(re.findall(r"[A-Za-z0-9]+", payload_text))
+        has_sentence_punctuation = any(char in payload_text for char in ".!,?:;")
+        return word_count >= 12 or (word_count >= 8 and has_sentence_punctuation)
 
     async def _run_bash_tool(self, code: str, *, tool_call_id: str) -> str:
         started_at = time.perf_counter()
