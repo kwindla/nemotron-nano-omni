@@ -62,25 +62,38 @@ index 39d59d2..d28cb51 100644
      """Test that data_parallel_rank is properly extracted from header and
 diff --git a/tests/entrypoints/openai/test_conversation_cache.py b/tests/entrypoints/openai/test_conversation_cache.py
 new file mode 100644
-index 0000000..9404a6c
+index 0000000..cde875c
 --- /dev/null
 +++ b/tests/entrypoints/openai/test_conversation_cache.py
-@@ -0,0 +1,666 @@
+@@ -0,0 +1,1468 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
 +import pytest
 +import torch
++from types import SimpleNamespace
 +
-+from vllm.entrypoints.openai.conversation_cache import ConversationFrontendCache
++from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
++from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
++from vllm.entrypoints.openai.conversation_cache import (
++    ConversationCacheKey,
++    ConversationFrontendCache,
++    ConversationFrontendLease,
++)
++from vllm.entrypoints.serve.render.serving import OpenAIServingRender
++from vllm.multimodal.inputs import PlaceholderRange
 +from vllm.sampling_params import SamplingParams
 +from vllm.v1.core.conversation_cache import (
 +    ConversationBlockCopy,
 +    ConversationEngineCache,
++    ConversationEngineState,
++    ConversationEngineCacheKey,
 +    ConversationMambaTerminalCapture,
++    ConversationMambaTerminalStateRef,
 +)
 +from vllm.v1.core.kv_cache_manager import KVCacheManager
 +from vllm.v1.core.sched.output import SchedulerOutput
++from vllm.v1.core.sched.scheduler import Scheduler
 +from vllm.v1.kv_cache_interface import (
 +    FullAttentionSpec,
 +    KVCacheConfig,
@@ -142,6 +155,358 @@ index 0000000..9404a6c
 +    assert lease_2.committed_messages == entry.committed_messages
 +    assert lease_2.committed_prompt_token_ids == (1, 2, 3)
 +    await cache.discard(lease_2)
++
++
++@pytest.mark.asyncio
++async def test_conversation_stream_wrapper_publishes_before_done_chunk():
++    serving = object.__new__(OpenAIServingChat)
++    events: list[tuple[str, str]] = []
++
++    async def fake_publish(
++        lease: ConversationFrontendLease,
++        assistant_text: str,
++        *,
++        assistant_tool_calls,
++        suffix_messages,
++        prompt_token_ids,
++    ) -> None:
++        assert lease.generation_id == "gen-1"
++        assert assistant_tool_calls is None
++        assert suffix_messages == [{"role": "user", "content": "hi"}]
++        assert prompt_token_ids == (1, 2, 3)
++        events.append(("publish", assistant_text))
++
++    async def fake_discard(lease: ConversationFrontendLease) -> None:
++        events.append(("discard", lease.generation_id))
++
++    serving._publish_conversation_response = fake_publish
++    serving._discard_conversation_lease = fake_discard
++
++    async def fake_stream():
++        yield 'data: {"choices":[{"delta":{"content":"hello"}}]}\n\n'
++        yield "data: [DONE]\n\n"
++
++    lease = ConversationFrontendLease(
++        key=ConversationCacheKey(model="model", cache_salt="", conversation_id="conv"),
++        generation_id="gen-1",
++    )
++
++    yielded_done = False
++    async for chunk in serving._conversation_stream_wrapper(
++        fake_stream(),
++        lease=lease,
++        suffix_messages=[{"role": "user", "content": "hi"}],
++        prompt_token_ids=(1, 2, 3),
++    ):
++        if chunk.strip() == "data: [DONE]":
++            yielded_done = True
++            assert events == [("publish", "hello")]
++
++    assert yielded_done
++    assert events == [("publish", "hello")]
++
++
++def test_conversation_suffix_messages_strips_overlapping_tool_call():
++    serving = object.__new__(OpenAIServingChat)
++    assistant_tool_call = {
++        "role": "assistant",
++        "content": None,
++        "tool_calls": [
++            {
++                "id": "tool-1",
++                "type": "function",
++                "function": {"name": "run_bash", "arguments": "{\"command\":\"pwd\"}"},
++            }
++        ],
++    }
++    tool_result = {
++        "role": "tool",
++        "tool_call_id": "tool-1",
++        "name": "run_bash",
++        "content": "/tmp\n",
++    }
++    lease = ConversationFrontendLease(
++        key=ConversationCacheKey(model="model", cache_salt="", conversation_id="conv"),
++        generation_id="gen-1",
++        committed_messages=(
++            {"role": "system", "content": "sys"},
++            {"role": "user", "content": "hi"},
++            assistant_tool_call,
++        ),
++        committed_message_count=3,
++    )
++    request = SimpleNamespace(messages=[assistant_tool_call, tool_result])
++
++    suffix = serving._conversation_suffix_messages(request, lease)
++
++    assert suffix == [tool_result]
++
++
++def test_filter_conversation_prefix_mm_input_preserves_placeholder_descriptors():
++    serving = object.__new__(OpenAIServingChat)
++    serving.create_error_response = lambda message, param=None: {
++        "message": message,
++        "param": param,
++    }
++
++    engine_input = {
++        "type": "multimodal",
++        "prompt_token_ids": list(range(30)),
++        "prompt": "prompt",
++        "conversation_id": "conv",
++        "mm_hashes": {"audio": ["audio-old", "audio-new"]},
++        "mm_placeholders": {
++            "audio": [
++                PlaceholderRange(offset=5, length=4),
++                PlaceholderRange(offset=20, length=3),
++            ]
++        },
++        "mm_kwargs": {
++            "audio": [
++                {"sample": "old"},
++                {"sample": "new"},
++            ]
++        },
++    }
++
++    filtered = serving._filter_conversation_prefix_mm_input(
++        engine_input,
++        boundary=12,
++        conversation_id="conv",
++    )
++
++    assert filtered["type"] == "multimodal"
++    assert filtered["mm_hashes"] == {"audio": ["audio-old", "audio-new"]}
++    assert filtered["mm_placeholders"]["audio"] == [
++        PlaceholderRange(offset=5, length=4),
++        PlaceholderRange(offset=20, length=3),
++    ]
++    assert filtered["mm_kwargs"] == {
++        "audio": [
++            None,
++            {"sample": "new"},
++        ]
++    }
++
++
++@pytest.mark.asyncio
++async def test_render_helper_reconstructs_suffix_only_conversation_messages():
++    cache = ConversationFrontendCache()
++    lease = await cache.try_acquire(
++        model="model",
++        cache_salt=None,
++        conversation_id="conv",
++        generation_id="gen-1",
++    )
++    assert lease is not None
++    await cache.publish(
++        lease,
++        assistant_text="hello",
++        committed_messages=[
++            {"role": "user", "content": "describe the image"},
++            {"role": "assistant", "content": "red square, blue circle"},
++        ],
++        committed_prompt_token_ids=[1, 2, 3],
++    )
++
++    serving = object.__new__(OpenAIServingRender)
++    serving.conversation_cache = cache
++    serving.create_error_response = lambda message, param=None: {
++        "message": message,
++        "param": param,
++    }
++
++    request = ChatCompletionRequest(
++        model="model",
++        messages=[
++            {
++                "role": "user",
++                "content": "What color is the square? Answer with one word only.",
++            }
++        ],
++        conversation_id="conv",
++        conversation_require_cache=True,
++    )
++
++    render_request, error = await serving._prepare_conversation_render_request(request)
++
++    assert error is None
++    assert render_request.messages == [
++        {"role": "user", "content": "describe the image"},
++        {"role": "assistant", "content": "red square, blue circle"},
++        {
++            "role": "user",
++            "content": "What color is the square? Answer with one word only.",
++        },
++    ]
++
++
++@pytest.mark.asyncio
++async def test_render_helper_reports_conversation_cache_miss():
++    serving = object.__new__(OpenAIServingRender)
++    serving.conversation_cache = ConversationFrontendCache()
++    serving.create_error_response = lambda message, param=None: {
++        "message": message,
++        "param": param,
++    }
++
++    request = ChatCompletionRequest(
++        model="model",
++        messages=[{"role": "user", "content": "hello"}],
++        conversation_id="missing-conv",
++        conversation_require_cache=True,
++    )
++
++    _, error = await serving._prepare_conversation_render_request(request)
++
++    assert error is not None
++    assert error["param"] == "conversation_id"
++    assert "Conversation cache miss" in error["message"]
++
++
++@pytest.mark.parametrize(
++    ("name", "committed_messages", "assistant_text", "suffix_messages"),
++    [
++        (
++            "plain_text",
++            [
++                {"role": "user", "content": "Tell me about a unicorn."},
++                {"role": "assistant", "content": "Unicorns are mythical creatures."},
++            ],
++            "Unicorns are mythical creatures.",
++            [{"role": "user", "content": "What creature did I ask about?"}],
++        ),
++        (
++            "tool_publish",
++            [
++                {
++                    "role": "user",
++                    "content": "Run pwd and reply with the output only.",
++                },
++                {
++                    "role": "assistant",
++                    "content": None,
++                    "tool_calls": [
++                        {
++                            "id": "tool-1",
++                            "type": "function",
++                            "function": {
++                                "name": "run_bash",
++                                "arguments": "{\"code\": \"pwd\"}",
++                            },
++                        }
++                    ],
++                },
++                {
++                    "role": "tool",
++                    "tool_call_id": "tool-1",
++                    "name": "run_bash",
++                    "content": "/tmp\n",
++                },
++                {"role": "assistant", "content": "/tmp"},
++            ],
++            "/tmp",
++            [{"role": "user", "content": "What exact path did the command print?"}],
++        ),
++        (
++            "multimodal_publish",
++            [
++                {
++                    "role": "user",
++                    "content": [
++                        {"type": "text", "text": "Describe this image briefly."},
++                        {
++                            "type": "image_url",
++                            "image_url": {"url": "file:///tmp/test-image.png"},
++                        },
++                    ],
++                },
++                {"role": "assistant", "content": "red square, blue circle"},
++            ],
++            "red square, blue circle",
++            [{"role": "user", "content": "What color is the square?"}],
++        ),
++        (
++            "multimodal_tool_publish",
++            [
++                {
++                    "role": "user",
++                    "content": [
++                        {"type": "text", "text": "Listen to this audio and run the command."},
++                        {
++                            "type": "audio_url",
++                            "audio_url": {"url": "file:///tmp/test-audio.wav"},
++                            "uuid": "file:///tmp/test-audio.wav",
++                        },
++                    ],
++                },
++                {
++                    "role": "assistant",
++                    "content": None,
++                    "tool_calls": [
++                        {
++                            "id": "tool-2",
++                            "type": "function",
++                            "function": {
++                                "name": "run_bash",
++                                "arguments": "{\"code\": \"echo audio command\"}",
++                            },
++                        }
++                    ],
++                },
++                {
++                    "role": "tool",
++                    "tool_call_id": "tool-2",
++                    "name": "run_bash",
++                    "content": "audio command\n",
++                },
++                {"role": "assistant", "content": "audio command"},
++            ],
++            "audio command",
++            [{"role": "user", "content": "What exact words did the command print?"}],
++        ),
++    ],
++)
++@pytest.mark.asyncio
++async def test_render_helper_reconstructs_publish_point_shapes(
++    name: str,
++    committed_messages: list[dict[str, object]],
++    assistant_text: str,
++    suffix_messages: list[dict[str, object]],
++):
++    cache = ConversationFrontendCache()
++    lease = await cache.try_acquire(
++        model="model",
++        cache_salt=None,
++        conversation_id=f"conv-{name}",
++        generation_id="gen-1",
++    )
++    assert lease is not None
++    await cache.publish(
++        lease,
++        assistant_text=assistant_text,
++        committed_messages=committed_messages,
++        committed_prompt_token_ids=[1, 2, 3],
++    )
++
++    serving = object.__new__(OpenAIServingRender)
++    serving.conversation_cache = cache
++    serving.create_error_response = lambda message, param=None: {
++        "message": message,
++        "param": param,
++    }
++
++    request = ChatCompletionRequest(
++        model="model",
++        messages=suffix_messages,
++        conversation_id=f"conv-{name}",
++        conversation_require_cache=True,
++    )
++
++    render_request, error = await serving._prepare_conversation_render_request(request)
++
++    assert error is None
++    assert render_request.messages == [*committed_messages, *suffix_messages]
 +
 +
 +def test_conversation_engine_cache_publish_discard_delete_and_ttl():
@@ -542,10 +907,11 @@ index 0000000..9404a6c
 +        token_count=request.num_tokens,
 +    )
 +    assert set(refs) == {0}
-+    block_index, terminal_block = refs[0]
++    block_index, terminal_block, accept_token_bias = refs[0]
 +    assert block_index == 1
 +    assert terminal_block.block_id == 1
 +    assert terminal_block.ref_cnt == 1
++    assert accept_token_bias == 0
 +
 +    forgotten = manager.forget_request_blocks(request.request_id)
 +    assert [block.block_id for block in forgotten[0]] == [0, 1]
@@ -607,8 +973,9 @@ index 0000000..9404a6c
 +        token_count=request.num_tokens,
 +    )
 +    assert set(mamba_refs) == {0}
-+    _block_index, terminal_block = mamba_refs[0]
++    _block_index, terminal_block, accept_token_bias = mamba_refs[0]
 +    assert terminal_block.ref_cnt == 1
++    assert accept_token_bias == 0
 +    manager.forget_request_blocks(request.request_id)
 +
 +    request_2 = Request(
@@ -627,6 +994,7 @@ index 0000000..9404a6c
 +    assert copies[0].kind == "mamba_terminal"
 +    assert copies[0].src_block_id == terminal_block.block_id
 +    assert copies[0].dst_block_id != terminal_block.block_id
++    assert copies[0].accept_token_bias == 0
 +    assert attached.get_block_ids()[0][-1] == copies[0].dst_block_id
 +    assert terminal_block.ref_cnt == 1
 +
@@ -636,8 +1004,6 @@ index 0000000..9404a6c
 +    request_2.status = RequestStatus.FINISHED_STOPPED
 +    manager.free(request_2)
 +    assert all(block.is_null or block.ref_cnt == 0 for block in request_2_blocks)
-+
-+
 +def test_conversation_hybrid_copy_on_write_attach_helper():
 +    full_spec = FullAttentionSpec(
 +        block_size=4,
@@ -707,6 +1073,215 @@ index 0000000..9404a6c
 +        assert all(block.is_null or block.ref_cnt == 0 for block in group_blocks)
 +
 +
++def test_conversation_hybrid_copy_on_write_multi_attach_preserves_original_state():
++    full_spec = FullAttentionSpec(
++        block_size=4,
++        num_kv_heads=1,
++        head_size=8,
++        dtype=torch.float16,
++    )
++    mamba_spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=32,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["layer.0"], kv_cache_spec=full_spec),
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=mamba_spec),
++            ],
++        ),
++        max_model_len=32,
++        hash_block_size=4,
++        max_num_batched_tokens=32,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-hybrid-root",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    manager.take_new_block_ids()
++    refs = manager.get_block_refs_by_group(request.request_id)
++    mamba_refs = manager.get_mamba_terminal_state_block_refs(
++        request.request_id,
++        token_count=request.num_tokens,
++    )
++    root_full_shared_id = refs[0][0].block_id
++    root_full_tail_id = refs[0][1].block_id
++    root_mamba_terminal_id = mamba_refs[1][1].block_id
++    manager.forget_request_blocks(request.request_id)
++
++    full_tail_ids: set[int] = set()
++    mamba_tail_ids: set[int] = set()
++    branched_request_ids: list[str] = []
++    for branch_index in range(3):
++        req_id = f"req-hybrid-branch-{branch_index}"
++        branch = Request(
++            request_id=req_id,
++            prompt_token_ids=[1, 2, 3, 4, 5, 6, 7],
++            sampling_params=SamplingParams(max_tokens=4),
++            pooling_params=None,
++        )
++        attached, copies = manager.attach_conversation_blocks_copy_on_write(
++            branch.request_id,
++            refs,
++            token_count=6,
++            mamba_terminal_refs=mamba_refs,
++        )
++        assert {copy.kind for copy in copies} == {
++            "full_attention_tail",
++            "mamba_terminal",
++        }
++        branch_block_ids = attached.get_block_ids()
++        assert branch_block_ids[0][0] == root_full_shared_id
++        assert branch_block_ids[0][1] != root_full_tail_id
++        assert branch_block_ids[1][-1] != root_mamba_terminal_id
++        full_tail_ids.add(branch_block_ids[0][1])
++        mamba_tail_ids.add(branch_block_ids[1][-1])
++        branched_request_ids.append(req_id)
++
++    assert len(full_tail_ids) == 3
++    assert len(mamba_tail_ids) == 3
++    assert refs[0][0].ref_cnt == 4
++    assert refs[0][1].ref_cnt == 1
++    assert mamba_refs[1][1].ref_cnt == 1
++
++    manager.release_block_refs_by_group(refs)
++    assert refs[0][0].ref_cnt == 3
++    assert refs[0][1].ref_cnt == 0
++    assert mamba_refs[1][1].ref_cnt == 0
++
++    for req_id in branched_request_ids:
++        branch = Request(
++            request_id=req_id,
++            prompt_token_ids=[1, 2, 3, 4, 5, 6, 7],
++            sampling_params=SamplingParams(max_tokens=4),
++            pooling_params=None,
++        )
++        branch.status = RequestStatus.FINISHED_STOPPED
++        manager.free(branch)
++
++    assert refs[0][0].ref_cnt == 0
++
++
++def test_conversation_mamba_terminal_copy_on_write_preserves_bias():
++    spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=8,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-mamba-bias-1",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    refs = manager.get_block_refs_by_group(request.request_id)
++    mamba_refs = manager.get_mamba_terminal_state_block_refs(
++        request.request_id,
++        token_count=request.num_tokens,
++    )
++    assert set(mamba_refs) == {0}
++    block_index, terminal_block, accept_token_bias = mamba_refs[0]
++    assert block_index == 1
++    assert accept_token_bias == 1
++    manager.forget_request_blocks(request.request_id)
++
++    request_2 = Request(
++        request_id="req-mamba-bias-2",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6, 7],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    attached, copies = manager.attach_conversation_blocks_copy_on_write(
++        request_2.request_id,
++        refs,
++        token_count=6,
++        mamba_terminal_refs=mamba_refs,
++    )
++    assert attached.get_block_ids()[0][-1] != terminal_block.block_id
++    assert len(copies) == 1
++    assert copies[0].kind == "mamba_terminal"
++    assert copies[0].accept_token_bias == 1
++
++
++def test_scheduler_uses_zero_bias_for_published_mamba_terminal_full_attach():
++    spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=8,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-sched-mamba-1",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    refs = manager.get_block_refs_by_group(request.request_id)
++    state = ConversationEngineState(
++        key=ConversationEngineCacheKey("conv", ""),
++        generation_id="gen-1",
++        token_count=6,
++        committed_token_ids=(1, 2, 3, 4, 5, 6),
++        prompt_token_ids=(1, 2, 3, 4, 5, 6),
++        output_token_ids=(),
++        finish_reason="stop",
++        stop_reason=None,
++        block_refs_by_group=refs,
++        mamba_terminal_state_refs=(
++            ConversationMambaTerminalStateRef(
++                kv_cache_group_id=0,
++                block_index=1,
++                block_id=refs[0][1].block_id,
++                accept_token_bias=1,
++            ),
++        ),
++    )
++    scheduler = Scheduler.__new__(Scheduler)
++    scheduler.kv_cache_manager = manager
++    resolved = scheduler._get_state_mamba_terminal_block_refs(state, token_count=6)
++    assert resolved[0][0] == 1
++    assert resolved[0][1].block_id == refs[0][1].block_id
++    assert resolved[0][2] == 0
++
++
 +def test_conversation_mamba_terminal_capture_scheduler_output_field():
 +    output = SchedulerOutput.make_empty()
 +    assert output.conversation_block_copies is None
@@ -732,6 +1307,276 @@ index 0000000..9404a6c
 +    )
 +    output.conversation_mamba_terminal_captures = [capture]
 +    assert output.conversation_mamba_terminal_captures[0].dst_block_index == 5
++
++
++def test_scheduler_shared_prefix_token_count_uses_replayable_prefix():
++    assert Scheduler._shared_prefix_token_count(
++        (1, 2, 3, 4, 99, 100),
++        (1, 2, 3, 4, 5, 6),
++    ) == 4
++    assert Scheduler._shared_prefix_token_count((1, 2, 3), (1, 2, 3, 4)) == 3
++    assert Scheduler._shared_prefix_token_count((1, 9, 3), (1, 2, 3)) == 1
++    assert Scheduler._shared_prefix_token_count((9, 2, 3), (1, 2, 3)) == 0
++
++
++@pytest.mark.parametrize(
++    ("state_token_count", "shared_prefix", "expected_attachable"),
++    [
++        (5, 5, 5),
++        (5, 4, 0),
++        (6, 6, 6),
++        (6, 5, 5),
++        (6, 4, 0),
++        (8, 8, 8),
++        (8, 7, 7),
++        (8, 4, 0),
++        (9, 9, 9),
++        (9, 8, 0),
++        (12, 11, 11),
++        (12, 8, 0),
++    ],
++)
++def test_scheduler_mamba_attachable_prefix_boundary_sweep(
++    state_token_count: int,
++    shared_prefix: int,
++    expected_attachable: int,
++):
++    spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=16,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=32,
++        hash_block_size=4,
++        max_num_batched_tokens=32,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id=f"req-state-{state_token_count}",
++        prompt_token_ids=list(range(1, state_token_count + 1)),
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    state = ConversationEngineState(
++        key=ConversationEngineCacheKey("conv", ""),
++        generation_id="gen-1",
++        token_count=state_token_count,
++        committed_token_ids=tuple(range(1, state_token_count + 1)),
++        prompt_token_ids=tuple(range(1, state_token_count + 1)),
++        output_token_ids=(),
++        finish_reason="stop",
++        stop_reason=None,
++        block_refs_by_group=manager.get_block_refs_by_group(request.request_id),
++    )
++    scheduler = Scheduler.__new__(Scheduler)
++    scheduler.kv_cache_manager = manager
++
++    if shared_prefix == state_token_count:
++        request_prompt_token_ids = list(range(1, state_token_count + 1))
++    else:
++        request_prompt_token_ids = list(range(1, shared_prefix + 1)) + [999]
++    candidate = Request(
++        request_id=f"req-candidate-{state_token_count}-{shared_prefix}",
++        prompt_token_ids=request_prompt_token_ids,
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++
++    assert (
++        scheduler._conversation_attachable_token_count(state, candidate)
++        == expected_attachable
++    )
++
++
++@pytest.mark.parametrize(
++    ("state_token_count", "attach_token_count", "expected_block_index", "expected_bias"),
++    [
++        (6, 5, 1, 0),
++        (7, 6, 1, 1),
++        (8, 7, 1, 2),
++        (12, 10, 2, 1),
++    ],
++)
++def test_scheduler_partial_attach_uses_expected_saved_terminal_block(
++    state_token_count: int,
++    attach_token_count: int,
++    expected_block_index: int,
++    expected_bias: int,
++):
++    spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=16,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=32,
++        hash_block_size=4,
++        max_num_batched_tokens=32,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id=f"req-state-{state_token_count}",
++        prompt_token_ids=list(range(1, state_token_count + 1)),
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    refs = manager.get_block_refs_by_group(request.request_id)
++    state = ConversationEngineState(
++        key=ConversationEngineCacheKey("conv", ""),
++        generation_id="gen-1",
++        token_count=state_token_count,
++        committed_token_ids=tuple(range(1, state_token_count + 1)),
++        prompt_token_ids=tuple(range(1, state_token_count + 1)),
++        output_token_ids=(),
++        finish_reason="stop",
++        stop_reason=None,
++        block_refs_by_group=refs,
++    )
++    scheduler = Scheduler.__new__(Scheduler)
++    scheduler.kv_cache_manager = manager
++
++    resolved = scheduler._get_state_mamba_terminal_block_refs(
++        state,
++        token_count=attach_token_count,
++    )
++
++    assert resolved[0][0] == expected_block_index
++    assert resolved[0][1].block_id == refs[0][expected_block_index].block_id
++    assert resolved[0][2] == expected_bias
++
++
++def test_scheduler_partial_mamba_attachable_prefix_stays_within_saved_terminal_block():
++    spec = MambaSpec(
++        block_size=4,
++        shapes=((2, 2),),
++        dtypes=(torch.float16,),
++        mamba_cache_mode="align",
++    )
++    manager = KVCacheManager(
++        kv_cache_config=KVCacheConfig(
++            num_blocks=8,
++            kv_cache_tensors=[],
++            kv_cache_groups=[
++                KVCacheGroupSpec(layer_names=["mamba.0"], kv_cache_spec=spec)
++            ],
++        ),
++        max_model_len=16,
++        hash_block_size=4,
++        max_num_batched_tokens=16,
++        enable_caching=False,
++    )
++    request = Request(
++        request_id="req-mamba-partial",
++        prompt_token_ids=[1, 2, 3, 4, 5, 6],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    manager.allocate_slots(request, num_new_tokens=request.num_tokens)
++    refs = manager.get_block_refs_by_group(request.request_id)
++    state = ConversationEngineState(
++        key=ConversationEngineCacheKey("conv", ""),
++        generation_id="gen-1",
++        token_count=6,
++        committed_token_ids=(1, 2, 3, 4, 5, 6),
++        prompt_token_ids=(1, 2, 3, 4, 5, 6),
++        output_token_ids=(),
++        finish_reason="stop",
++        stop_reason=None,
++        block_refs_by_group=refs,
++    )
++
++    scheduler = Scheduler.__new__(Scheduler)
++    scheduler.kv_cache_manager = manager
++
++    request_same_block = Request(
++        request_id="req-shared-5",
++        prompt_token_ids=[1, 2, 3, 4, 5, 9],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++    request_previous_block = Request(
++        request_id="req-shared-4",
++        prompt_token_ids=[1, 2, 3, 4, 9, 9],
++        sampling_params=SamplingParams(max_tokens=4),
++        pooling_params=None,
++    )
++
++    assert scheduler._conversation_attachable_token_count(
++        state,
++        request_same_block,
++    ) == 5
++    assert scheduler._conversation_attachable_token_count(
++        state,
++        request_previous_block,
++    ) == 0
++
++    same_block_refs = scheduler._get_state_mamba_terminal_block_refs(
++        state,
++        token_count=5,
++    )
++    assert same_block_refs[0][0] == 1
+diff --git a/tests/entrypoints/openai/test_tool_calls_serialization.py b/tests/entrypoints/openai/test_tool_calls_serialization.py
+index cedc257..eab480a 100644
+--- a/tests/entrypoints/openai/test_tool_calls_serialization.py
++++ b/tests/entrypoints/openai/test_tool_calls_serialization.py
+@@ -17,6 +17,7 @@ models because:
+ 
+ import pytest
+ 
++from vllm.entrypoints.chat_utils import _postprocess_messages
+ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+ 
+ 
+@@ -110,6 +111,30 @@ def test_tool_calls_list_passthrough():
+     assert isinstance(assistant_msg.get("tool_calls"), list)
+ 
+ 
++def test_postprocess_assistant_tool_calls_normalizes_empty_openai_content():
++    message = {
++        "role": "assistant",
++        "content": [],
++        "tool_calls": [_make_tool_call("call_empty", "run", '{"cmd":"pwd"}')],
++    }
++
++    _postprocess_messages([message])
++
++    assert message["content"] == ""
++
++
++def test_postprocess_assistant_tool_calls_normalizes_text_part_content():
++    message = {
++        "role": "assistant",
++        "content": [{"type": "text", "text": "<think></think>"}],
++        "tool_calls": [_make_tool_call("call_text", "run", '{"cmd":"pwd"}')],
++    }
++
++    _postprocess_messages([message])
++
++    assert message["content"] == "<think></think>"
++
++
+ def test_messages_without_tool_calls_unaffected():
+     """Messages without tool_calls must be handled correctly."""
+     messages = [
 diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
 index 50013a0..04137da 100644
 --- a/vllm/engine/protocol.py
@@ -782,6 +1627,51 @@ index 50013a0..04137da 100644
      @abstractmethod
      async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
          """Sleep the engine"""
+diff --git a/vllm/entrypoints/chat_utils.py b/vllm/entrypoints/chat_utils.py
+index bd4f29a..074b68a 100644
+--- a/vllm/entrypoints/chat_utils.py
++++ b/vllm/entrypoints/chat_utils.py
+@@ -1581,12 +1581,40 @@ def _parse_chat_message_content(
+ 
+ 
+ def _postprocess_messages(messages: list[ConversationMessage]) -> None:
++    def normalize_text_only_content(content: Any) -> str | None:
++        if not isinstance(content, list):
++            return None
++
++        text_parts: list[str] = []
++        for item in content:
++            if not isinstance(item, dict):
++                return None
++
++            part_type = item.get("type")
++            if part_type == "text":
++                text_parts.append(item.get("text", ""))
++            elif part_type == "thinking":
++                text_parts.append(item.get("thinking", ""))
++            elif part_type == "refusal":
++                text_parts.append(item.get("refusal", ""))
++            else:
++                return None
++
++        return "\n".join(text_parts) if text_parts else ""
++
+     # per the Transformers docs & maintainers, tool call arguments in
+     # assistant-role messages with tool_calls need to be dicts not JSON str -
+     # this is how tool-use chat templates will expect them moving forwards
+     # so, for messages that have tool_calls, parse the string (which we get
+     # from openAI format) to dict
+     for message in messages:
++        normalized_content = normalize_text_only_content(message.get("content"))
++        if normalized_content is not None:
++            # Keep text-only messages render-stable for templates that expect
++            # plain-string system/assistant/tool content while still leaving
++            # multimodal user messages as structured part lists.
++            message["content"] = normalized_content
++
+         if message["role"] == "assistant" and "tool_calls" in message:
+             tool_calls = message.get("tool_calls")
+             if not isinstance(tool_calls, list):
 diff --git a/vllm/entrypoints/openai/chat_completion/api_router.py b/vllm/entrypoints/openai/chat_completion/api_router.py
 index cdaaa27..56d4256 100644
 --- a/vllm/entrypoints/openai/chat_completion/api_router.py
@@ -880,14 +1770,15 @@ index aacac38..a091139 100644
      @classmethod
      def check_system_message_content_type(cls, data):
 diff --git a/vllm/entrypoints/openai/chat_completion/serving.py b/vllm/entrypoints/openai/chat_completion/serving.py
-index 12dc2cd..aedabb5 100644
+index 12dc2cd..676a1e3 100644
 --- a/vllm/entrypoints/openai/chat_completion/serving.py
 +++ b/vllm/entrypoints/openai/chat_completion/serving.py
-@@ -2,12 +2,14 @@
+@@ -2,12 +2,16 @@
  # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  
  import asyncio
 +import copy
++import hashlib
  import json
 +import os
  import time
@@ -895,11 +1786,12 @@ index 12dc2cd..aedabb5 100644
  from collections.abc import Sequence as GenericSequence
  from http import HTTPStatus
 -from typing import TYPE_CHECKING, Any, Final
++from pathlib import Path
 +from typing import TYPE_CHECKING, Any, Final, cast
  
  import partial_json_parser
  import regex as re
-@@ -39,6 +41,12 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
+@@ -39,6 +43,12 @@ from vllm.entrypoints.openai.chat_completion.stream_harmony import (
      TokenState,
      extract_harmony_streaming_delta,
  )
@@ -912,7 +1804,7 @@ index 12dc2cd..aedabb5 100644
  from vllm.entrypoints.openai.engine.protocol import (
      DeltaFunctionCall,
      DeltaMessage,
-@@ -63,7 +71,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
+@@ -63,7 +73,7 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
  )
  from vllm.entrypoints.openai.utils import maybe_filter_parallel_tool_calls
  from vllm.entrypoints.utils import get_max_tokens, should_include_usage
@@ -921,11 +1813,91 @@ index 12dc2cd..aedabb5 100644
  from vllm.logger import init_logger
  from vllm.logprobs import Logprob
  from vllm.outputs import CompletionOutput, RequestOutput
-@@ -177,6 +185,55 @@ class OpenAIServingChat(OpenAIServing):
+@@ -81,6 +91,67 @@ if TYPE_CHECKING:
+     from vllm.entrypoints.serve.render.serving import OpenAIServingRender
+ 
+ logger = init_logger(__name__)
++CONVERSATION_TRACE_DIR = (
++    Path(os.environ["VLLM_CONVERSATION_TRACE_DIR"])
++    if os.getenv("VLLM_CONVERSATION_TRACE_DIR")
++    else None
++)
++
++
++def _trace_json_value(value: Any) -> Any:
++    if hasattr(value, "model_dump"):
++        return _trace_json_value(value.model_dump(mode="json"))
++    if isinstance(value, dict):
++        if (
++            set(value.keys()) == {"url"}
++            and isinstance(value["url"], str)
++            and value["url"].startswith("data:audio/")
++        ):
++            url = value["url"]
++            _, _, encoded = url.partition(",")
++            digest = hashlib.sha256(encoded.encode("ascii")).hexdigest()
++            return {
++                "url": f"<data-audio-base64 sha256={digest} chars={len(encoded)}>",
++            }
++        return {str(key): _trace_json_value(item) for key, item in value.items()}
++    if isinstance(value, (list, tuple)):
++        return [_trace_json_value(item) for item in value]
++    return value
++
++
++def _write_conversation_trace(
++    trace_id: str | None,
++    phase: str,
++    payload: dict[str, Any],
++) -> None:
++    if CONVERSATION_TRACE_DIR is None or not trace_id:
++        return
++    try:
++        CONVERSATION_TRACE_DIR.mkdir(parents=True, exist_ok=True)
++        trace_path = CONVERSATION_TRACE_DIR / f"{trace_id}.{phase}.json"
++        trace_payload = {
++            "trace_id": trace_id,
++            "phase": phase,
++            "timestamp": time.time(),
++            **payload,
++        }
++        trace_path.write_text(
++            json.dumps(
++                _trace_json_value(trace_payload),
++                indent=2,
++                ensure_ascii=True,
++                sort_keys=True,
++            )
++            + "\n",
++            encoding="utf-8",
++        )
++    except Exception as exc:
++        logger.warning(
++            "Failed to write conversation trace for %s phase %s: %s",
++            trace_id,
++            phase,
++            exc,
++        )
+ 
+ 
+ class OpenAIServingChat(OpenAIServing):
+@@ -105,6 +176,7 @@ class OpenAIServingChat(OpenAIServing):
+         enable_log_outputs: bool = False,
+         enable_log_deltas: bool = True,
+         default_chat_template_kwargs: dict[str, Any] | None = None,
++        conversation_cache: ConversationFrontendCache | None = None,
+     ) -> None:
+         super().__init__(
+             engine_client=engine_client,
+@@ -177,6 +249,59 @@ class OpenAIServingChat(OpenAIServing):
          # Please use the Responses API instead.
          self.supports_code_interpreter = False
          self.python_tool = None
-+        self.conversation_cache = ConversationFrontendCache()
++        self.conversation_cache = (
++            conversation_cache
++            if conversation_cache is not None
++            else ConversationFrontendCache()
++        )
 +        self.conversation_cache_max_entries = self._conversation_cache_positive_int(
 +            "VLLM_CONVERSATION_CACHE_MAX_ENTRIES",
 +            8,
@@ -977,7 +1949,7 @@ index 12dc2cd..aedabb5 100644
  
      def warmup(self) -> None:
          self.renderer.warmup(
-@@ -230,7 +287,12 @@ class OpenAIServingChat(OpenAIServing):
+@@ -230,7 +355,12 @@ class OpenAIServingChat(OpenAIServing):
          self,
          request: ChatCompletionRequest,
          raw_request: Request | None = None,
@@ -991,7 +1963,7 @@ index 12dc2cd..aedabb5 100644
          """
          Chat Completion API similar to OpenAI's API.
  
-@@ -239,6 +301,10 @@ class OpenAIServingChat(OpenAIServing):
+@@ -239,6 +369,10 @@ class OpenAIServingChat(OpenAIServing):
          Chat Completion API.
          """
          # Streaming response
@@ -1002,7 +1974,7 @@ index 12dc2cd..aedabb5 100644
          tokenizer = self.renderer.tokenizer
          assert tokenizer is not None
          chat_template_kwargs = self._effective_chat_template_kwargs(request)
-@@ -248,11 +314,6 @@ class OpenAIServingChat(OpenAIServing):
+@@ -248,115 +382,253 @@ class OpenAIServingChat(OpenAIServing):
                  tokenizer,
                  chat_template_kwargs=chat_template_kwargs,  # type: ignore[call-arg]
              )
@@ -1014,7 +1986,14 @@ index 12dc2cd..aedabb5 100644
  
          request_id = (
              f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-@@ -262,101 +323,184 @@ class OpenAIServingChat(OpenAIServing):
+         )
++        trace_id = (
++            raw_request.headers.get("X-Request-Id")
++            if raw_request is not None
++            else request_id
++        )
+ 
+         request_metadata = RequestResponseMetadata(request_id=request_id)
          if raw_request:
              raw_request.state.request_metadata = request_metadata
  
@@ -1044,6 +2023,34 @@ index 12dc2cd..aedabb5 100644
 +            render_request, conversation_suffix_messages = (
 +                self._prepare_conversation_render_request(request, conversation_lease)
 +            )
++        _write_conversation_trace(
++            trace_id,
++            "vllm-pre-render",
++            {
++                "request_id": request_id,
++                "conversation_id": request.conversation_id,
++                "conversation_require_cache": request.conversation_require_cache,
++                "incoming_messages": request.messages,
++                "render_messages": render_request.messages,
++                "suffix_messages": conversation_suffix_messages,
++                "committed_messages": (
++                    list(conversation_lease.committed_messages)
++                    if conversation_lease is not None
++                    else []
++                ),
++                "committed_message_count": (
++                    conversation_lease.committed_message_count
++                    if conversation_lease is not None
++                    else 0
++                ),
++                "committed_prompt_token_count": (
++                    len(conversation_lease.committed_prompt_token_ids)
++                    if conversation_lease is not None
++                    and conversation_lease.committed_prompt_token_ids is not None
++                    else 0
++                ),
++            },
++        )
  
 -        # Schedule the request and get the result generator.
 -        max_model_len = self.model_config.max_model_len
@@ -1104,6 +2111,33 @@ index 12dc2cd..aedabb5 100644
 +        model_name = self.models.model_name(lora_request)
 +        conversation_prompt_token_ids = self._conversation_prompt_token_ids(
 +            engine_inputs
++        )
++        prompt_components = (
++            self._extract_prompt_components(engine_inputs[0]) if engine_inputs else None
++        )
++        _write_conversation_trace(
++            trace_id,
++            "vllm-rendered-prompt",
++            {
++                "request_id": request_id,
++                "conversation_id": request.conversation_id,
++                "prompt_text": (
++                    prompt_components.text if prompt_components is not None else None
++                ),
++                "prompt_text_sha256": (
++                    hashlib.sha256(
++                        (prompt_components.text or "").encode("utf-8")
++                    ).hexdigest()
++                    if prompt_components is not None
++                    else None
++                ),
++                "prompt_token_ids": conversation_prompt_token_ids,
++                "prompt_token_count": (
++                    len(conversation_prompt_token_ids)
++                    if conversation_prompt_token_ids is not None
++                    else 0
++                ),
++            },
 +        )
  
 -            self._log_inputs(
@@ -1198,9 +2232,7 @@ index 12dc2cd..aedabb5 100644
 +                    if raw_request is None
 +                    else await self._get_trace_headers(raw_request.headers)
 +                )
- 
--        assert len(generators) == 1
--        (result_generator,) = generators
++
 +                if isinstance(sampling_params, BeamSearchParams):
 +                    generator = self.beam_search(
 +                        prompt=engine_input,
@@ -1234,7 +2266,9 @@ index 12dc2cd..aedabb5 100644
 +                        data_parallel_rank=data_parallel_rank,
 +                        reasoning_ended=reasoning_ended,
 +                    )
-+
+ 
+-        assert len(generators) == 1
+-        (result_generator,) = generators
 +                generators.append(generator)
 +
 +            assert len(generators) == 1
@@ -1274,7 +2308,7 @@ index 12dc2cd..aedabb5 100644
                  result_generator,
                  request_id,
                  model_name,
-@@ -364,19 +508,549 @@ class OpenAIServingChat(OpenAIServing):
+@@ -364,19 +636,609 @@ class OpenAIServingChat(OpenAIServing):
                  tokenizer,
                  request_metadata,
                  reasoning_parser,
@@ -1295,10 +2329,7 @@ index 12dc2cd..aedabb5 100644
 +            if conversation_lease is not None:
 +                await self._discard_conversation_lease(conversation_lease)
 +            raise
- 
--        return await self.chat_completion_full_generator(
--            request,
--            result_generator,
++
 +    def _validate_conversation_cache_request(
 +        self, request: ChatCompletionRequest
 +    ) -> ErrorResponse | None:
@@ -1359,6 +2390,13 @@ index 12dc2cd..aedabb5 100644
 +            committed_count,
 +        ):
 +            return copy.deepcopy(request.messages[committed_count:])
++        overlap = self._leading_overlap_with_committed_tail(
++            request.messages,
++            lease.committed_messages,
++            committed_count,
++        )
++        if overlap > 0:
++            return copy.deepcopy(request.messages[overlap:])
 +        return copy.deepcopy(request.messages)
 +
 +    @staticmethod
@@ -1375,6 +2413,39 @@ index 12dc2cd..aedabb5 100644
 +            ):
 +                return False
 +        return True
++
++    @classmethod
++    def _leading_overlap_with_committed_tail(
++        cls,
++        messages: GenericSequence[Any],
++        committed_messages: GenericSequence[Any],
++        committed_count: int,
++    ) -> int:
++        max_overlap = min(len(messages), committed_count, len(committed_messages))
++        for overlap in range(max_overlap, 0, -1):
++            committed_start = committed_count - overlap
++            if all(
++                cls._normalized_message(messages[index])
++                == cls._normalized_message(
++                    committed_messages[committed_start + index]
++                )
++                for index in range(overlap)
++            ):
++                return overlap
++        return 0
++
++    @classmethod
++    def _normalized_message(cls, value: Any) -> Any:
++        if hasattr(value, "model_dump"):
++            return cls._normalized_message(value.model_dump(mode="json"))
++        if isinstance(value, dict):
++            return {
++                str(key): cls._normalized_message(item)
++                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
++            }
++        if isinstance(value, (list, tuple)):
++            return [cls._normalized_message(item) for item in value]
++        return value
 +
 +    @staticmethod
 +    def _message_role(message: Any) -> Any:
@@ -1401,7 +2472,10 @@ index 12dc2cd..aedabb5 100644
 +                return filtered
 +            engine_inputs[index] = filtered
 +        return None
-+
+ 
+-        return await self.chat_completion_full_generator(
+-            request,
+-            result_generator,
 +    def _filter_conversation_prefix_mm_input(
 +        self,
 +        engine_input: EngineInput,
@@ -1436,15 +2510,22 @@ index 12dc2cd..aedabb5 100644
 +                    f"{len(kwargs_items)}",
 +                    param="messages",
 +                )
-+            modality_keep_indexes: list[int] = []
++            filtered_hashes: list[str] = []
++            filtered_placeholders: list[Any] = []
++            filtered_kwargs: list[Any] = []
 +            for item_index, placeholder in enumerate(placeholders):
 +                start = placeholder.offset
 +                end = placeholder.offset + placeholder.length
 +                if end <= boundary:
++                    filtered_placeholders.append(placeholder)
++                    filtered_hashes.append(hashes[item_index])
++                    filtered_kwargs.append(None)
 +                    removed += 1
 +                    continue
 +                if start >= boundary:
-+                    modality_keep_indexes.append(item_index)
++                    filtered_placeholders.append(placeholder)
++                    filtered_hashes.append(hashes[item_index])
++                    filtered_kwargs.append(kwargs_items[item_index])
 +                    kept += 1
 +                    continue
 +                return self.create_error_response(
@@ -1455,41 +2536,23 @@ index 12dc2cd..aedabb5 100644
 +                    param="messages",
 +                )
 +
-+            if modality_keep_indexes:
-+                kept_placeholders[modality] = [
-+                    placeholders[item_index] for item_index in modality_keep_indexes
-+                ]
-+                kept_hashes[modality] = [
-+                    hashes[item_index]
-+                    for item_index in modality_keep_indexes
-+                    if item_index < len(hashes)
-+                ]
-+                kept_kwargs_data[modality] = [
-+                    kwargs_items[item_index]
-+                    for item_index in modality_keep_indexes
-+                    if item_index < len(kwargs_items)
-+                ]
++            if filtered_placeholders:
++                kept_placeholders[modality] = filtered_placeholders
++                kept_hashes[modality] = filtered_hashes
++                kept_kwargs_data[modality] = filtered_kwargs
 +
 +        if removed == 0:
 +            return engine_input
 +
 +        logger.debug(
-+            "Filtered %d cached multimodal feature(s) for conversation %s; "
-+            "kept %d suffix feature(s).",
++            "Filtered %d cached multimodal payload(s) for conversation %s; "
++            "kept %d suffix payload(s) and preserved %d placeholder "
++            "descriptor(s).",
 +            removed,
 +            conversation_id,
 +            kept,
++            sum(len(items) for items in kept_kwargs_data.values()),
 +        )
-+        if kept == 0:
-+            token_input = tokens_input(
-+                list(mm_engine_input["prompt_token_ids"]),
-+                prompt=mm_engine_input.get("prompt"),
-+                cache_salt=mm_engine_input.get("cache_salt"),
-+                conversation_id=mm_engine_input.get("conversation_id"),
-+            )
-+            if "arrival_time" in mm_engine_input:
-+                token_input["arrival_time"] = mm_engine_input["arrival_time"]
-+            return token_input
 +
 +        filtered_input = dict(mm_engine_input)
 +        filtered_input["mm_hashes"] = kept_hashes
@@ -1670,6 +2733,21 @@ index 12dc2cd..aedabb5 100644
 +            *copy.deepcopy(suffix_messages),
 +            assistant_message,
 +        ]
++        _write_conversation_trace(
++            lease.generation_id.removeprefix("chatcmpl-"),
++            "vllm-publish",
++            {
++                "conversation_id": lease.key.conversation_id,
++                "assistant_text": assistant_text,
++                "assistant_tool_calls": assistant_tool_calls,
++                "suffix_messages": suffix_messages,
++                "committed_messages": committed_messages,
++                "prompt_token_ids": prompt_token_ids,
++                "prompt_token_count": (
++                    len(prompt_token_ids) if prompt_token_ids is not None else 0
++                ),
++            },
++        )
 +        await self.conversation_cache.publish(
 +            lease,
 +            assistant_text=assistant_text,
@@ -1706,6 +2784,7 @@ index 12dc2cd..aedabb5 100644
 +        assistant_tool_calls_by_index: dict[int, dict[str, Any]] = {}
 +        saw_done = False
 +        saw_error = False
++        lease_finalized = False
 +
 +        try:
 +            async for chunk in stream_generator:
@@ -1720,8 +2799,23 @@ index 12dc2cd..aedabb5 100644
 +                    )
 +                saw_done = saw_done or done
 +                saw_error = saw_error or error
++                if done and not error and not lease_finalized:
++                    await self._publish_conversation_response(
++                        lease,
++                        "".join(assistant_text_parts),
++                        assistant_tool_calls=(
++                            self._finalize_conversation_stream_tool_calls(
++                                assistant_tool_calls_by_index
++                            )
++                        ),
++                        suffix_messages=suffix_messages,
++                        prompt_token_ids=prompt_token_ids,
++                    )
++                    lease_finalized = True
 +                yield chunk
 +
++            if lease_finalized:
++                return
 +            if saw_done and not saw_error:
 +                await self._publish_conversation_response(
 +                    lease,
@@ -2067,11 +3161,252 @@ index 0000000..2d24f3d
 +            cache_salt=cache_salt or "",
 +            conversation_id=conversation_id,
 +        )
+diff --git a/vllm/entrypoints/openai/generate/api_router.py b/vllm/entrypoints/openai/generate/api_router.py
+index 9a64db9..96d6161 100644
+--- a/vllm/entrypoints/openai/generate/api_router.py
++++ b/vllm/entrypoints/openai/generate/api_router.py
+@@ -56,6 +56,9 @@ async def init_generate_state(
+         MCPToolServer,
+         ToolServer,
+     )
++    from vllm.entrypoints.openai.conversation_cache import (
++        ConversationFrontendCache,
++    )
+     from vllm.entrypoints.openai.chat_completion.batch_serving import (
+         OpenAIServingChatBatch,
+     )
+@@ -74,6 +77,8 @@ async def init_generate_state(
+     else:
+         tool_server = None
+     resolved_chat_template = load_chat_template(args.chat_template)
++    shared_conversation_cache = ConversationFrontendCache()
++    state.openai_serving_render.conversation_cache = shared_conversation_cache
+ 
+     # Render endpoints are always backed by OpenAIServingRender so that
+     # /v1/chat/completions/render and /v1/completions/render work on both
+@@ -118,6 +123,7 @@ async def init_generate_state(
+         enable_force_include_usage=args.enable_force_include_usage,
+         enable_log_outputs=args.enable_log_outputs,
+         enable_log_deltas=args.enable_log_deltas,
++        conversation_cache=shared_conversation_cache,
+     )
+     state.openai_serving_chat = (
+         OpenAIServingChat(**_chat_kwargs) if "generate" in supported_tasks else None
 diff --git a/vllm/entrypoints/serve/render/serving.py b/vllm/entrypoints/serve/render/serving.py
-index 32c3351..52ca841 100644
+index 32c3351..6cc4644 100644
 --- a/vllm/entrypoints/serve/render/serving.py
 +++ b/vllm/entrypoints/serve/render/serving.py
-@@ -432,7 +432,11 @@ class OpenAIServingRender:
+@@ -1,5 +1,6 @@
+ # SPDX-License-Identifier: Apache-2.0
+ # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
++import copy
+ from collections.abc import Sequence
+ from http import HTTPStatus
+ from typing import Any, cast
+@@ -13,6 +14,7 @@ from vllm.entrypoints.chat_utils import (
+ )
+ from vllm.entrypoints.logger import RequestLogger
+ from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
++from vllm.entrypoints.openai.conversation_cache import ConversationFrontendCache
+ from vllm.entrypoints.openai.completion.protocol import CompletionRequest
+ from vllm.entrypoints.openai.engine.protocol import (
+     ErrorResponse,
+@@ -79,6 +81,7 @@ class OpenAIServingRender:
+         reasoning_parser: str | None = None,
+         default_chat_template_kwargs: dict[str, Any] | None = None,
+         log_error_stack: bool = False,
++        conversation_cache: ConversationFrontendCache | None = None,
+     ) -> None:
+         self.model_config = model_config
+         self.renderer = renderer
+@@ -105,6 +108,7 @@ class OpenAIServingRender:
+             default_chat_template_kwargs or {}
+         )
+         self.log_error_stack = log_error_stack
++        self.conversation_cache = conversation_cache
+         self.use_harmony = model_config.hf_config.model_type == "gpt_oss"
+         self.supports_browsing = False
+         self.supports_code_interpreter = False
+@@ -136,7 +140,18 @@ class OpenAIServingRender:
+                 "Beam search is not supported by the render endpoint"
+             )
+ 
+-        result = await self.render_chat(request, skip_mm_cache=True)
++        render_request = request
++        if request.conversation_id:
++            error = self._validate_conversation_cache_request(request)
++            if error is not None:
++                return error
++            render_request, error = await self._prepare_conversation_render_request(
++                request
++            )
++            if error is not None:
++                return error
++
++        result = await self.render_chat(render_request, skip_mm_cache=True)
+         if isinstance(result, ErrorResponse):
+             return result
+ 
+@@ -181,6 +196,158 @@ class OpenAIServingRender:
+             priority=request.priority,
+         )
+ 
++    def _validate_conversation_cache_request(
++        self, request: ChatCompletionRequest
++    ) -> ErrorResponse | None:
++        if not request.conversation_id:
++            return None
++        if request.n not in (None, 1):
++            return self.create_error_response(
++                "conversation_id only supports n=1 in this implementation."
++            )
++        if request.use_beam_search:
++            return self.create_error_response(
++                "conversation_id does not support beam search in this implementation."
++            )
++        if request.continue_final_message:
++            return self.create_error_response(
++                "conversation_id does not support continue_final_message."
++            )
++        if not request.add_generation_prompt:
++            return self.create_error_response(
++                "conversation_id requires add_generation_prompt=true."
++            )
++        return None
++
++    async def _prepare_conversation_render_request(
++        self,
++        request: ChatCompletionRequest,
++    ) -> tuple[ChatCompletionRequest, ErrorResponse | None]:
++        if not request.conversation_id:
++            return request, None
++        if self.conversation_cache is None:
++            return request, self.create_error_response(
++                "conversation_id render requires a frontend conversation cache.",
++                param="conversation_id",
++            )
++
++        if request.conversation_require_cache and not (
++            await self.conversation_cache.can_satisfy_suffix_only(
++                model=request.model,
++                cache_salt=request.cache_salt,
++                conversation_id=request.conversation_id,
++            )
++        ):
++            return request, self.create_error_response(
++                f"Conversation cache miss for {request.conversation_id!r}; "
++                "conversation_id was not present in the frontend cache.",
++                param="conversation_id",
++            )
++
++        entry = self.conversation_cache.get_entry(
++            model=request.model,
++            cache_salt=request.cache_salt,
++            conversation_id=request.conversation_id,
++        )
++        if entry is None or not entry.committed_messages:
++            return request, None
++
++        suffix_messages = self._conversation_suffix_messages(
++            request.messages,
++            entry.committed_messages,
++            entry.committed_message_count,
++        )
++        render_messages = [
++            *copy.deepcopy(list(entry.committed_messages)),
++            *copy.deepcopy(suffix_messages),
++        ]
++        render_request = request.model_copy(update={"messages": render_messages})
++        logger.debug(
++            "Rendering conversation %s via /render with %d committed messages and %d suffix messages.",
++            request.conversation_id,
++            len(entry.committed_messages),
++            len(suffix_messages),
++        )
++        return render_request, None
++
++    @classmethod
++    def _conversation_suffix_messages(
++        cls,
++        messages: Sequence[Any],
++        committed_messages: Sequence[Any],
++        committed_count: int,
++    ) -> list[Any]:
++        if committed_count <= 0 or not committed_messages:
++            return copy.deepcopy(list(messages))
++        if len(messages) > committed_count and cls._looks_like_full_history(
++            messages,
++            committed_messages,
++            committed_count,
++        ):
++            return copy.deepcopy(list(messages[committed_count:]))
++        overlap = cls._leading_overlap_with_committed_tail(
++            messages,
++            committed_messages,
++            committed_count,
++        )
++        if overlap > 0:
++            return copy.deepcopy(list(messages[overlap:]))
++        return copy.deepcopy(list(messages))
++
++    @staticmethod
++    def _looks_like_full_history(
++        messages: Sequence[Any],
++        committed_messages: Sequence[Any],
++        committed_count: int,
++    ) -> bool:
++        if len(committed_messages) < committed_count:
++            return False
++        for index in range(committed_count):
++            if OpenAIServingRender._message_role(messages[index]) != (
++                OpenAIServingRender._message_role(committed_messages[index])
++            ):
++                return False
++        return True
++
++    @classmethod
++    def _leading_overlap_with_committed_tail(
++        cls,
++        messages: Sequence[Any],
++        committed_messages: Sequence[Any],
++        committed_count: int,
++    ) -> int:
++        max_overlap = min(len(messages), committed_count, len(committed_messages))
++        for overlap in range(max_overlap, 0, -1):
++            committed_start = committed_count - overlap
++            if all(
++                cls._normalized_message(messages[index])
++                == cls._normalized_message(
++                    committed_messages[committed_start + index]
++                )
++                for index in range(overlap)
++            ):
++                return overlap
++        return 0
++
++    @classmethod
++    def _normalized_message(cls, value: Any) -> Any:
++        if hasattr(value, "model_dump"):
++            return cls._normalized_message(value.model_dump(mode="json"))
++        if isinstance(value, dict):
++            return {
++                str(key): cls._normalized_message(item)
++                for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
++            }
++        if isinstance(value, (list, tuple)):
++            return [cls._normalized_message(item) for item in value]
++        return value
++
++    @staticmethod
++    def _message_role(message: Any) -> Any:
++        if isinstance(message, dict):
++            return message.get("role")
++        return getattr(message, "role", None)
++
+     async def render_chat(
+         self,
+         request: ChatCompletionRequest,
+@@ -432,7 +599,11 @@ class OpenAIServingRender:
  
          # Render prompt token ids.
          prompt_token_ids = render_for_completion(messages)
@@ -2084,7 +3419,7 @@ index 32c3351..52ca841 100644
  
          return messages, [engine_input]
  
-@@ -514,7 +518,7 @@ class OpenAIServingRender:
+@@ -514,7 +685,7 @@ class OpenAIServingRender:
              tok_params,
              prompt_extras={
                  k: v
@@ -2093,7 +3428,7 @@ index 32c3351..52ca841 100644
                  if (v := getattr(request, k, None)) is not None
              },
              skip_mm_cache=skip_mm_cache,
-@@ -560,7 +564,7 @@ class OpenAIServingRender:
+@@ -560,7 +731,7 @@ class OpenAIServingRender:
              tok_params,
              prompt_extras={
                  k: v
@@ -2255,10 +3590,10 @@ index 2f10302..ea3cbe5 100644
  
 diff --git a/vllm/v1/core/conversation_cache.py b/vllm/v1/core/conversation_cache.py
 new file mode 100644
-index 0000000..66c9f11
+index 0000000..e96f754
 --- /dev/null
 +++ b/vllm/v1/core/conversation_cache.py
-@@ -0,0 +1,420 @@
+@@ -0,0 +1,422 @@
 +# SPDX-License-Identifier: Apache-2.0
 +# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 +
@@ -2284,6 +3619,7 @@ index 0000000..66c9f11
 +    kv_cache_group_id: int
 +    block_index: int
 +    block_id: int
++    accept_token_bias: int = 0
 +
 +
 +@dataclass(frozen=True)
@@ -2302,6 +3638,7 @@ index 0000000..66c9f11
 +    src_block_id: int
 +    dst_block_id: int
 +    kind: Literal["full_attention_tail", "mamba_terminal"]
++    accept_token_bias: int = 0
 +
 +
 +@dataclass
@@ -2680,14 +4017,17 @@ index 0000000..66c9f11
 +        value = getattr(reason, "value", reason)
 +        return str(value)
 diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
-index 83aa26b..c05a60c 100644
+index 83aa26b..3117560 100644
 --- a/vllm/v1/core/kv_cache_manager.py
 +++ b/vllm/v1/core/kv_cache_manager.py
-@@ -8,10 +8,12 @@ from typing import Literal, overload
+@@ -8,10 +8,15 @@ from typing import Literal, overload
  
  from vllm.distributed.kv_events import KVCacheEvent
  from vllm.logger import init_logger
-+from vllm.v1.core.conversation_cache import ConversationBlockCopy
++from vllm.v1.core.conversation_cache import (
++    ConversationBlockCopy,
++    ConversationMambaTerminalCapture,
++)
  from vllm.v1.core.kv_cache_coordinator import get_kv_cache_coordinator
  from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
  from vllm.v1.core.kv_cache_utils import KVCacheBlock
@@ -2697,7 +4037,7 @@ index 83aa26b..c05a60c 100644
  from vllm.v1.metrics.stats import PrefixCacheStats
  from vllm.v1.request import Request
  
-@@ -530,6 +532,260 @@ class KVCacheManager:
+@@ -530,6 +535,291 @@ class KVCacheManager:
          """Get the block ids of a request."""
          return self.get_blocks(request_id).get_block_ids()
  
@@ -2829,7 +4169,7 @@ index 83aa26b..c05a60c 100644
 +        blocks_by_group: Sequence[Sequence[KVCacheBlock]],
 +        *,
 +        token_count: int,
-+        mamba_terminal_refs: dict[int, tuple[int, KVCacheBlock]],
++        mamba_terminal_refs: dict[int, tuple[int, KVCacheBlock, int]],
 +    ) -> tuple[KVCacheBlocks, tuple[ConversationBlockCopy, ...]]:
 +        """Attach exact conversation state with request-owned mutable blocks."""
 +        for group_id, (manager, blocks) in enumerate(
@@ -2895,12 +4235,13 @@ index 83aa26b..c05a60c 100644
 +                ref = mamba_terminal_refs.get(group_id)
 +                if ref is None:
 +                    continue
-+                expected_block_index, block = ref
++                expected_block_index, block, accept_token_bias = ref
 +                attached_block_index, copy = (
 +                    manager.attach_terminal_state_block_copy_on_write(
 +                        request_id,
 +                        token_count,
 +                        block,
++                        accept_token_bias=accept_token_bias,
 +                    )
 +                )
 +                if attached_block_index != expected_block_index:
@@ -2912,9 +4253,9 @@ index 83aa26b..c05a60c 100644
 +        self,
 +        request_id: str,
 +        token_count: int,
-+    ) -> dict[int, tuple[int, KVCacheBlock]]:
++    ) -> dict[int, tuple[int, KVCacheBlock, int]]:
 +        """Get exact terminal Mamba state block refs by KV cache group."""
-+        refs: dict[int, tuple[int, KVCacheBlock]] = {}
++        refs: dict[int, tuple[int, KVCacheBlock, int]] = {}
 +        for group_id, manager in enumerate(self.coordinator.single_type_managers):
 +            if not isinstance(manager.kv_cache_spec, MambaSpec):
 +                continue
@@ -2922,21 +4263,51 @@ index 83aa26b..c05a60c 100644
 +                continue
 +            ref = manager.get_terminal_state_block_ref(request_id, token_count)
 +            if ref is not None:
-+                refs[group_id] = ref
++                block_index, block = ref
++                refs[group_id] = (
++                    block_index,
++                    block,
++                    manager.get_terminal_state_accept_token_bias(token_count),
++                )
 +        return refs
++
++    def get_mamba_terminal_state_captures(
++        self,
++        request_id: str,
++        token_count: int,
++    ) -> list[ConversationMambaTerminalCapture]:
++        """Get exact terminal Mamba state capture work by KV cache group."""
++        captures: list[ConversationMambaTerminalCapture] = []
++        for group_id, manager in enumerate(self.coordinator.single_type_managers):
++            if not isinstance(manager.kv_cache_spec, MambaSpec):
++                continue
++            if getattr(manager, "mamba_cache_mode", None) != "align":
++                continue
++            capture = manager.get_terminal_state_capture(request_id, token_count)
++            if capture is not None:
++                captures.append(
++                    ConversationMambaTerminalCapture(
++                        request_id=request_id,
++                        kv_cache_group_id=group_id,
++                        src_block_index=capture[0],
++                        dst_block_index=capture[1],
++                        accept_token_bias=capture[2],
++                    )
++                )
++        return captures
 +
 +    def attach_mamba_terminal_state_block_refs(
 +        self,
 +        request_id: str,
 +        token_count: int,
-+        refs: dict[int, tuple[int, KVCacheBlock]],
++        refs: dict[int, tuple[int, KVCacheBlock, int]],
 +    ) -> dict[int, int]:
 +        """Attach exact terminal Mamba state refs to a request.
 +
 +        The returned mapping is group id to attached block-table index.
 +        """
 +        attached: dict[int, int] = {}
-+        for group_id, (_block_index, block) in refs.items():
++        for group_id, (_block_index, block, _accept_token_bias) in refs.items():
 +            manager = self.coordinator.single_type_managers[group_id]
 +            assert isinstance(manager.kv_cache_spec, MambaSpec)
 +            attached[group_id] = manager.attach_terminal_state_block(
@@ -2948,9 +4319,9 @@ index 83aa26b..c05a60c 100644
 +
 +    def release_mamba_terminal_state_block_refs(
 +        self,
-+        refs: dict[int, tuple[int, KVCacheBlock]],
++        refs: dict[int, tuple[int, KVCacheBlock, int]],
 +    ) -> None:
-+        for group_id, (_block_index, block) in refs.items():
++        for group_id, (_block_index, block, _accept_token_bias) in refs.items():
 +            manager = self.coordinator.single_type_managers[group_id]
 +            assert isinstance(manager.kv_cache_spec, MambaSpec)
 +            manager.release_block_refs([block])
@@ -2992,18 +4363,25 @@ index bdb97de..902f9f7 100644
      def make_empty(cls) -> "SchedulerOutput":
          return cls(
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index 395fa80..db0b8f8 100644
+index 395fa80..d2d5b4d 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
-@@ -1,6 +1,7 @@
+@@ -1,10 +1,14 @@
  # SPDX-License-Identifier: Apache-2.0
  # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
  import itertools
++import json
++import os
 +import os
  import time
  from collections import defaultdict, deque
  from collections.abc import Iterable
-@@ -32,6 +33,13 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+ from dataclasses import replace
++from pathlib import Path
+ from typing import Any
+ 
+ import numpy as np
+@@ -32,6 +36,14 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
  )
  from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
  from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -3012,14 +4390,18 @@ index 395fa80..db0b8f8 100644
 +    ConversationEngineCache,
 +    ConversationEngineCacheKey,
 +    ConversationEngineState,
++    ConversationMambaTerminalCapture,
 +    ConversationMambaTerminalStateRef,
 +)
  from vllm.v1.core.encoder_cache_manager import (
      EncoderCacheManager,
      EncoderDecoderCacheManager,
-@@ -54,7 +62,11 @@ from vllm.v1.core.sched.utils import check_stop, remove_all
+@@ -52,9 +64,13 @@ from vllm.v1.core.sched.request_queue import (
+ )
+ from vllm.v1.core.sched.utils import check_stop, remove_all
  from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
- from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
+-from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
++from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig, MambaSpec
  from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 -from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 +from vllm.v1.metrics.stats import (
@@ -3030,7 +4412,55 @@ index 395fa80..db0b8f8 100644
  from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
  from vllm.v1.request import Request, RequestStatus, StreamingUpdate
  from vllm.v1.spec_decode.metrics import SpecDecodingStats
-@@ -120,6 +132,9 @@ class Scheduler(SchedulerInterface):
+@@ -63,6 +79,47 @@ from vllm.v1.utils import record_function_or_nullcontext
+ 
+ logger = init_logger(__name__)
+ 
++CONVERSATION_CACHE_DEBUG = os.getenv("VLLM_CONVERSATION_CACHE_DEBUG") == "1"
++CONVERSATION_TRACE_DIR = (
++    Path(os.environ["VLLM_CONVERSATION_TRACE_DIR"])
++    if os.getenv("VLLM_CONVERSATION_TRACE_DIR")
++    else None
++)
++
++
++def _write_conversation_scheduler_trace(
++    trace_id: str | None,
++    payload: dict[str, Any],
++    *,
++    phase: str = "scheduler-attach",
++) -> None:
++    if CONVERSATION_TRACE_DIR is None or not trace_id:
++        return
++    try:
++        CONVERSATION_TRACE_DIR.mkdir(parents=True, exist_ok=True)
++        trace_path = CONVERSATION_TRACE_DIR / f"{trace_id}.{phase}.json"
++        trace_path.write_text(
++            json.dumps(
++                {
++                    "trace_id": trace_id,
++                    "phase": phase,
++                    "timestamp": time.time(),
++                    **payload,
++                },
++                indent=2,
++                ensure_ascii=True,
++                sort_keys=True,
++            )
++            + "\n",
++            encoding="utf-8",
++        )
++    except Exception as exc:
++        logger.warning(
++            "Failed to write scheduler attach trace for %s: %s",
++            trace_id,
++            exc,
++        )
++
+ 
+ class Scheduler(SchedulerInterface):
+     def __init__(
+@@ -120,6 +177,9 @@ class Scheduler(SchedulerInterface):
          # KV Connector pushes/pull of remote KVs for P/D and offloading.
          self.connector = None
          self.connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -3040,7 +4470,7 @@ index 395fa80..db0b8f8 100644
          self.recompute_kv_load_failures = True
          if self.vllm_config.kv_transfer_config is not None:
              assert not self.is_encoder_decoder, (
-@@ -238,6 +253,33 @@ class Scheduler(SchedulerInterface):
+@@ -238,6 +298,36 @@ class Scheduler(SchedulerInterface):
              hash_block_size=hash_block_size,
              metrics_collector=self.kv_metrics_collector,
          )
@@ -3071,10 +4501,13 @@ index 395fa80..db0b8f8 100644
 +                self.conversation_cache_min_free_blocks
 +            )
 +        self._conversation_block_copies_to_run: list[ConversationBlockCopy] = []
++        self._conversation_mamba_terminal_captures_to_run: list[
++            ConversationMambaTerminalCapture
++        ] = []
          # Bind GPU block pool to the KV connector. This must happen after
          # kv_cache_manager is constructed so block_pool is available.
          if self.connector is not None and hasattr(
-@@ -299,6 +341,31 @@ class Scheduler(SchedulerInterface):
+@@ -299,6 +389,31 @@ class Scheduler(SchedulerInterface):
  
          self._pause_state: PauseState = PauseState.UNPAUSED
  
@@ -3106,7 +4539,7 @@ index 395fa80..db0b8f8 100644
      def _mamba_block_aligned_split(
          self,
          request: Request,
-@@ -383,6 +450,10 @@ class Scheduler(SchedulerInterface):
+@@ -383,6 +498,10 @@ class Scheduler(SchedulerInterface):
          scheduled_timestamp = time.monotonic()
  
          self.kv_cache_manager.new_step_starts()
@@ -3117,7 +4550,7 @@ index 395fa80..db0b8f8 100644
  
          # First, schedule the RUNNING requests.
          req_index = 0
-@@ -914,11 +985,12 @@ class Scheduler(SchedulerInterface):
+@@ -914,11 +1033,16 @@ class Scheduler(SchedulerInterface):
          self.prev_step_scheduled_req_ids.clear()
          self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
  
@@ -3127,21 +4560,28 @@ index 395fa80..db0b8f8 100644
 -            if self.needs_kv_cache_zeroing
 -            else None
 +            (new_block_ids or None) if self.needs_kv_cache_zeroing else None
-         )
++        )
 +        conversation_block_copies = self._conversation_block_copies_to_run or None
 +        self._conversation_block_copies_to_run = []
++        conversation_mamba_terminal_captures = (
++            self._conversation_mamba_terminal_captures_to_run or None
+         )
++        self._conversation_mamba_terminal_captures_to_run = []
  
          scheduler_output = SchedulerOutput(
              scheduled_new_reqs=new_reqs_data,
-@@ -936,6 +1008,7 @@ class Scheduler(SchedulerInterface):
+@@ -936,6 +1060,10 @@ class Scheduler(SchedulerInterface):
              finished_req_ids=self.finished_req_ids,
              free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
              new_block_ids_to_zero=new_block_ids_to_zero,
 +            conversation_block_copies=conversation_block_copies,
++            conversation_mamba_terminal_captures=(
++                conversation_mamba_terminal_captures
++            ),
          )
  
          # NOTE(Kuntai): this function is designed for multiple purposes:
-@@ -1438,6 +1511,7 @@ class Scheduler(SchedulerInterface):
+@@ -1438,6 +1566,7 @@ class Scheduler(SchedulerInterface):
                  finish_reason = request.get_finished_reason()
                  finished = self._handle_stopped_request(request)
                  if finished:
@@ -3149,7 +4589,7 @@ index 395fa80..db0b8f8 100644
                      kv_transfer_params = self._free_request(request)
  
                  if status_before_stop == RequestStatus.RUNNING:
-@@ -1755,11 +1829,138 @@ class Scheduler(SchedulerInterface):
+@@ -1755,11 +1884,391 @@ class Scheduler(SchedulerInterface):
          else:
              if request.resumable:
                  request.streaming_queue = deque()
@@ -3180,27 +4620,105 @@ index 395fa80..db0b8f8 100644
 +        if state.token_count <= 0:
 +            self._record_conversation_cache_stats(request, conversation_cache_hits)
 +            return
-+        if state.token_count >= request.num_tokens:
++        shared_prefix = self._shared_prefix_token_count(
++            state.committed_token_ids,
++            request.prompt_token_ids or (),
++        )
++        attach_token_count = self._conversation_attachable_token_count(state, request)
++        trace_payload = {
++            "conversation_id": request.conversation_id,
++            "conversation_generation_id": request.conversation_generation_id,
++            "shared_prefix": shared_prefix,
++            "attach_token_count": attach_token_count,
++            "alignment_limited": attach_token_count < shared_prefix,
++            "request_prompt_tokens": request.num_tokens,
++            "state_prompt_tokens": len(state.prompt_token_ids),
++            "state_output_tokens": len(state.output_token_ids),
++            "state_total_tokens": state.token_count,
++        }
++        if attach_token_count <= 0:
++            _write_conversation_scheduler_trace(
++                request.conversation_generation_id,
++                {
++                    **trace_payload,
++                    "attached": False,
++                    "reason": "no_replayable_prefix",
++                },
++            )
 +            logger.warning(
 +                "Conversation cache attach skipped for %s generation %s because "
-+                "committed tokens=%d >= request tokens=%d. This usually means "
-+                "the frontend did not reconstruct the committed conversation "
-+                "prefix before scheduling.",
++                "the request prompt shares no replayable prefix with the "
++                "committed conversation cache state (committed tokens=%d, "
++                "request tokens=%d). This usually means the frontend did not "
++                "reconstruct the committed conversation prefix before "
++                "scheduling.",
 +                request.conversation_id,
 +                request.conversation_generation_id,
 +                state.token_count,
 +                request.num_tokens,
 +            )
++            if CONVERSATION_CACHE_DEBUG:
++                self._log_conversation_cache_debug(
++                    state=state,
++                    request=request,
++                    shared_prefix=shared_prefix,
++                    attach_token_count=attach_token_count,
++                )
 +            self._record_conversation_cache_stats(request, conversation_cache_hits)
 +            return
++        if attach_token_count >= request.num_tokens:
++            _write_conversation_scheduler_trace(
++                request.conversation_generation_id,
++                {
++                    **trace_payload,
++                    "attached": False,
++                    "reason": "request_does_not_extend_prefix",
++                },
++            )
++            logger.warning(
++                "Conversation cache attach skipped for %s generation %s because "
++                "the request prompt does not extend the replayable committed "
++                "prefix (attachable tokens=%d, committed tokens=%d, request "
++                "tokens=%d).",
++                request.conversation_id,
++                request.conversation_generation_id,
++                attach_token_count,
++                state.token_count,
++                request.num_tokens,
++            )
++            self._record_conversation_cache_stats(request, conversation_cache_hits)
++            return
++        if attach_token_count < state.token_count:
++            logger.info(
++                "Attaching partial conversation cache for %s generation %s "
++                "using replayable prefix tokens=%d/%d request_tokens=%d.",
++                request.conversation_id,
++                request.conversation_generation_id,
++                attach_token_count,
++                state.token_count,
++                request.num_tokens,
++            )
 +
-+        mamba_terminal_refs = self._get_state_mamba_terminal_block_refs(state)
++        mamba_terminal_refs = self._get_state_mamba_terminal_block_refs(
++            state,
++            token_count=attach_token_count,
++        )
++        trace_payload["mamba_terminal_refs"] = {
++            str(group_id): {
++                "block_index": block_index,
++                "block_id": block.block_id,
++                "accept_token_bias": accept_token_bias,
++            }
++            for group_id, (block_index, block, accept_token_bias) in (
++                mamba_terminal_refs.items()
++            )
++        }
 +        try:
 +            _attached_blocks, copies = (
 +                self.kv_cache_manager.attach_conversation_blocks_copy_on_write(
 +                    request.request_id,
 +                    state.block_refs_by_group,
-+                    token_count=state.token_count,
++                    token_count=attach_token_count,
 +                    mamba_terminal_refs=mamba_terminal_refs,
 +                )
 +            )
@@ -3218,7 +4736,7 @@ index 395fa80..db0b8f8 100644
 +                        self.kv_cache_manager.attach_conversation_blocks_copy_on_write(
 +                            request.request_id,
 +                            state.block_refs_by_group,
-+                            token_count=state.token_count,
++                            token_count=attach_token_count,
 +                            mamba_terminal_refs=mamba_terminal_refs,
 +                        )
 +                    )
@@ -3244,15 +4762,23 @@ index 395fa80..db0b8f8 100644
 +                self._record_conversation_cache_stats(request, conversation_cache_hits)
 +                return
 +
-+        conversation_cache_hits = state.token_count
-+        request.num_computed_tokens = state.token_count
++        conversation_cache_hits = attach_token_count
++        request.num_computed_tokens = attach_token_count
 +        self._record_conversation_cache_stats(request, conversation_cache_hits)
 +        self._conversation_block_copies_to_run.extend(copies)
++        _write_conversation_scheduler_trace(
++            request.conversation_generation_id,
++            {
++                **trace_payload,
++                "attached": True,
++                "copies": len(copies),
++            },
++        )
 +        logger.info(
 +            "Attached conversation cache for %s generation %s tokens=%d copies=%d.",
 +            request.conversation_id,
 +            request.conversation_generation_id,
-+            state.token_count,
++            attach_token_count,
 +            len(copies),
 +        )
 +
@@ -3268,27 +4794,194 @@ index 395fa80..db0b8f8 100644
 +            num_hits=num_hits,
 +        )
 +
++    @staticmethod
++    def _shared_prefix_token_count(
++        cached_token_ids: list[int] | tuple[int, ...],
++        request_token_ids: list[int] | tuple[int, ...],
++    ) -> int:
++        shared = 0
++        for cached_token_id, request_token_id in zip(
++            cached_token_ids,
++            request_token_ids,
++        ):
++            if cached_token_id != request_token_id:
++                break
++            shared += 1
++        return shared
++
++    def _conversation_attachable_token_count(
++        self,
++        state: ConversationEngineState,
++        request: Request,
++    ) -> int:
++        prompt_token_ids = request.prompt_token_ids
++        if prompt_token_ids is None:
++            return 0
++        shared_prefix = self._shared_prefix_token_count(
++            state.committed_token_ids,
++            prompt_token_ids,
++        )
++        if shared_prefix <= 0:
++            return 0
++
++        compatible_intervals = [(1, shared_prefix)]
++        for group_id, manager in enumerate(
++            self.kv_cache_manager.coordinator.single_type_managers
++        ):
++            if not isinstance(getattr(manager, "kv_cache_spec", None), MambaSpec):
++                continue
++            if getattr(manager, "mamba_cache_mode", None) != "align":
++                continue
++            if group_id >= len(state.block_refs_by_group):
++                return 0
++            blocks = state.block_refs_by_group[group_id]
++            if not blocks:
++                return 0
++
++            group_intervals: list[tuple[int, int]] = []
++            for block_index, block in enumerate(blocks):
++                if block.is_null:
++                    continue
++                start = block_index * manager.block_size + 1
++                end = min(
++                    (block_index + 1) * manager.block_size,
++                    state.token_count,
++                    shared_prefix,
++                )
++                if start <= end:
++                    group_intervals.append((start, end))
++
++            if not group_intervals:
++                return 0
++
++            next_intervals: list[tuple[int, int]] = []
++            for left_start, left_end in compatible_intervals:
++                for right_start, right_end in group_intervals:
++                    start = max(left_start, right_start)
++                    end = min(left_end, right_end)
++                    if start <= end:
++                        next_intervals.append((start, end))
++            if not next_intervals:
++                return 0
++            compatible_intervals = next_intervals
++
++        return max(end for _, end in compatible_intervals)
++
++    def _log_conversation_cache_debug(
++        self,
++        *,
++        state: ConversationEngineState,
++        request: Request,
++        shared_prefix: int,
++        attach_token_count: int,
++    ) -> None:
++        request_prompt_token_ids = tuple(request.prompt_token_ids or ())
++        mismatch_index = min(shared_prefix, len(state.committed_token_ids))
++        cached_window_start = max(0, mismatch_index - 8)
++        cached_window_end = min(len(state.committed_token_ids), mismatch_index + 8)
++        request_window_start = max(0, shared_prefix - 8)
++        request_window_end = min(len(request_prompt_token_ids), shared_prefix + 8)
++        cached_window = list(state.committed_token_ids[cached_window_start:cached_window_end])
++        request_window = list(
++            request_prompt_token_ids[request_window_start:request_window_end]
++        )
++        cached_token_at_mismatch = (
++            state.committed_token_ids[shared_prefix]
++            if shared_prefix < len(state.committed_token_ids)
++            else None
++        )
++        request_token_at_mismatch = (
++            request_prompt_token_ids[shared_prefix]
++            if shared_prefix < len(request_prompt_token_ids)
++            else None
++        )
++        logger.warning(
++            "Conversation cache debug for %s generation %s: shared_prefix=%d "
++            "attachable=%d state_prompt_tokens=%d state_output_tokens=%d "
++            "state_total_tokens=%d request_prompt_tokens=%d "
++            "cached_token_at_mismatch=%r request_token_at_mismatch=%r "
++            "cached_window[%d:%d]=%s request_window[%d:%d]=%s",
++            request.conversation_id,
++            request.conversation_generation_id,
++            shared_prefix,
++            attach_token_count,
++            len(state.prompt_token_ids),
++            len(state.output_token_ids),
++            state.token_count,
++            len(request_prompt_token_ids),
++            cached_token_at_mismatch,
++            request_token_at_mismatch,
++            cached_window_start,
++            cached_window_end,
++            cached_window,
++            request_window_start,
++            request_window_end,
++            request_window,
++        )
++
 +    def _get_state_mamba_terminal_block_refs(
 +        self,
 +        state: ConversationEngineState,
++        *,
++        token_count: int,
 +    ) -> dict[int, tuple[int, Any]]:
-+        refs: dict[int, tuple[int, Any]] = {}
-+        for ref in state.mamba_terminal_state_refs:
-+            if ref.kv_cache_group_id >= len(state.block_refs_by_group):
++        if token_count <= 0:
++            return {}
++        refs: dict[int, tuple[int, Any, int]] = {}
++        if token_count == state.token_count and state.mamba_terminal_state_refs:
++            for ref in state.mamba_terminal_state_refs:
++                group_id = ref.kv_cache_group_id
++                if group_id >= len(state.block_refs_by_group):
++                    continue
++                blocks = state.block_refs_by_group[group_id]
++                if ref.block_index >= len(blocks):
++                    continue
++                block = blocks[ref.block_index]
++                if block.is_null or block.block_id != ref.block_id:
++                    continue
++                refs[group_id] = (
++                    ref.block_index,
++                    block,
++                    # A published conversation state has already materialized
++                    # the exact terminal Mamba state into the referenced block.
++                    # Reapplying the saved live->terminal bias during a later
++                    # exact-token attach would shift the terminal state twice.
++                    0,
++                )
++            if refs:
++                return refs
++        for group_id, manager in enumerate(
++            self.kv_cache_manager.coordinator.single_type_managers
++        ):
++            if not isinstance(getattr(manager, "kv_cache_spec", None), MambaSpec):
 +                continue
-+            blocks = state.block_refs_by_group[ref.kv_cache_group_id]
-+            if ref.block_index >= len(blocks):
++            if getattr(manager, "mamba_cache_mode", None) != "align":
 +                continue
-+            block = blocks[ref.block_index]
-+            if block.block_id != ref.block_id:
++            if group_id >= len(state.block_refs_by_group):
 +                continue
-+            refs[ref.kv_cache_group_id] = (ref.block_index, block)
++            blocks = state.block_refs_by_group[group_id]
++            if not blocks:
++                continue
++            try:
++                block_index = manager.get_terminal_state_block_index(token_count)
++            except ValueError:
++                continue
++            if block_index >= len(blocks):
++                continue
++            block = blocks[block_index]
++            if block.is_null:
++                continue
++            refs[group_id] = (
++                block_index,
++                block,
++                manager.get_terminal_state_accept_token_bias(token_count),
++            )
 +        return refs
 +
      def finish_requests(
          self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
      ) -> list[tuple[str, int]]:
-@@ -1846,6 +2047,186 @@ class Scheduler(SchedulerInterface):
+@@ -1846,6 +2355,213 @@ class Scheduler(SchedulerInterface):
          self.kv_cache_manager.free(request)
          del self.requests[request.request_id]
  
@@ -3315,6 +5008,31 @@ index 395fa80..db0b8f8 100644
 +        self._release_conversation_states(
 +            self.conversation_cache.expire_pending_with_released().release_states
 +        )
++        captures = self.kv_cache_manager.get_mamba_terminal_state_captures(
++            request.request_id,
++            request.num_tokens,
++        )
++        self._conversation_mamba_terminal_captures_to_run.extend(captures)
++        _write_conversation_scheduler_trace(
++            request.conversation_generation_id,
++            {
++                "phase": "scheduler-stage-pending",
++                "conversation_id": request.conversation_id,
++                "conversation_generation_id": request.conversation_generation_id,
++                "request_num_tokens": request.num_tokens,
++                "captures": [
++                    {
++                        "request_id": capture.request_id,
++                        "kv_cache_group_id": capture.kv_cache_group_id,
++                        "src_block_index": capture.src_block_index,
++                        "dst_block_index": capture.dst_block_index,
++                        "accept_token_bias": capture.accept_token_bias,
++                    }
++                    for capture in captures
++                ],
++            },
++            phase="scheduler-stage-pending",
++        )
 +        block_refs_by_group = self.kv_cache_manager.get_block_refs_by_group(
 +            request.request_id
 +        )
@@ -3323,10 +5041,12 @@ index 395fa80..db0b8f8 100644
 +                kv_cache_group_id=group_id,
 +                block_index=block_index,
 +                block_id=block.block_id,
++                accept_token_bias=accept_token_bias,
 +            )
 +            for group_id, (
 +                block_index,
 +                block,
++                accept_token_bias,
 +            ) in self.kv_cache_manager.get_mamba_terminal_state_block_refs(
 +                request.request_id,
 +                request.num_tokens,
@@ -3475,7 +5195,7 @@ index 395fa80..db0b8f8 100644
      @property
      def pause_state(self) -> PauseState:
          return self._pause_state
-@@ -1936,6 +2317,69 @@ class Scheduler(SchedulerInterface):
+@@ -1936,6 +2652,69 @@ class Scheduler(SchedulerInterface):
          """
          self.encoder_cache_manager.reset()
  
@@ -3545,7 +5265,7 @@ index 395fa80..db0b8f8 100644
      def make_stats(
          self,
          spec_decoding_stats: SpecDecodingStats | None = None,
-@@ -1951,6 +2395,9 @@ class Scheduler(SchedulerInterface):
+@@ -1951,6 +2730,9 @@ class Scheduler(SchedulerInterface):
          if self.connector_prefix_cache_stats is not None:
              connector_prefix_cache_stats = self.connector_prefix_cache_stats
              self.connector_prefix_cache_stats = PrefixCacheStats()
@@ -3555,7 +5275,7 @@ index 395fa80..db0b8f8 100644
          eviction_events = (
              self.kv_metrics_collector.drain_events()
              if self.kv_metrics_collector is not None
-@@ -1967,6 +2414,7 @@ class Scheduler(SchedulerInterface):
+@@ -1967,6 +2749,7 @@ class Scheduler(SchedulerInterface):
              kv_cache_usage=self.kv_cache_manager.usage,
              prefix_cache_stats=prefix_cache_stats,
              connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -3564,7 +5284,7 @@ index 395fa80..db0b8f8 100644
              spec_decoding_stats=spec_stats,
              kv_connector_stats=connector_stats_payload,
 diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
-index 0aa08f3..7b54825 100644
+index 0aa08f3..da9ca4f 100644
 --- a/vllm/v1/core/single_type_kv_cache_manager.py
 +++ b/vllm/v1/core/single_type_kv_cache_manager.py
 @@ -7,6 +7,7 @@ from collections.abc import Sequence
@@ -3676,7 +5396,7 @@ index 0aa08f3..7b54825 100644
      @abstractmethod
      def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
          """
-@@ -1035,6 +1130,75 @@ class MambaManager(SingleTypeKVCacheManager):
+@@ -1035,6 +1130,121 @@ class MambaManager(SingleTypeKVCacheManager):
              self.last_state_block_idx.pop(request_id, None)
          super().free(request_id)
  
@@ -3694,6 +5414,14 @@ index 0aa08f3..7b54825 100644
 +            raise ValueError("Mamba terminal state refs require at least one token")
 +        return (token_count - 1) // self.block_size
 +
++    def get_terminal_state_accept_token_bias(self, token_count: int) -> int:
++        assert isinstance(self.kv_cache_spec, MambaSpec)
++        if self.mamba_cache_mode != "align":
++            raise ValueError("Mamba terminal state refs require align cache mode")
++        if token_count <= 0:
++            raise ValueError("Mamba terminal state refs require at least one token")
++        return (token_count - 1) % self.block_size
++
 +    def get_terminal_state_block_ref(
 +        self,
 +        request_id: str,
@@ -3707,6 +5435,41 @@ index 0aa08f3..7b54825 100644
 +        if block.is_null:
 +            return None
 +        return block_index, block
++
++    def get_terminal_state_capture(
++        self,
++        request_id: str,
++        token_count: int,
++    ) -> tuple[int, int, int] | None:
++        """Return live->terminal Mamba state capture metadata.
++
++        The scheduler-side request block table tracks the durable terminal block
++        position derived from ``token_count``. In align mode, however, the live
++        running state can still reside in a later scratch block. This returns
++        the source running-state block index, the destination terminal block
++        index, and the accept-token bias needed to materialize the exact final
++        state into the durable terminal slot before the request is freed.
++        """
++        assert isinstance(self.kv_cache_spec, MambaSpec)
++        if self.mamba_cache_mode != "align":
++            return None
++        blocks = self.req_to_blocks.get(request_id)
++        if not blocks:
++            return None
++        dst_block_index = self.get_terminal_state_block_index(token_count)
++        if dst_block_index >= len(blocks) or blocks[dst_block_index].is_null:
++            return None
++        if request_id in self._allocated_block_reqs:
++            src_block_index = len(blocks) - 1 - self.num_speculative_blocks
++        else:
++            src_block_index = dst_block_index
++        if src_block_index >= len(blocks) or blocks[src_block_index].is_null:
++            return None
++        return (
++            src_block_index,
++            dst_block_index,
++            self.get_terminal_state_accept_token_bias(token_count),
++        )
 +
 +    def attach_terminal_state_block(
 +        self,
@@ -3728,6 +5491,8 @@ index 0aa08f3..7b54825 100644
 +        request_id: str,
 +        token_count: int,
 +        block: KVCacheBlock,
++        *,
++        accept_token_bias: int = 0,
 +    ) -> tuple[int, ConversationBlockCopy]:
 +        """Attach a request-owned copy of an exact terminal Mamba state."""
 +        block_index = self.get_terminal_state_block_index(token_count)
@@ -3747,6 +5512,7 @@ index 0aa08f3..7b54825 100644
 +            src_block_id=block.block_id,
 +            dst_block_id=dst_block.block_id,
 +            kind="mamba_terminal",
++            accept_token_bias=accept_token_bias,
 +        )
 +
      def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:
@@ -4438,10 +6204,19 @@ index a0ba47f..774ae94 100644
          # Free the cached encoder outputs.
          for mm_hash in scheduler_output.free_encoder_mm_hashes:
 diff --git a/vllm/v1/worker/mamba_utils.py b/vllm/v1/worker/mamba_utils.py
-index c832389..4f236cd 100644
+index c832389..bfbbb42 100644
 --- a/vllm/v1/worker/mamba_utils.py
 +++ b/vllm/v1/worker/mamba_utils.py
-@@ -133,6 +133,41 @@ def collect_mamba_copy_meta(
+@@ -10,6 +10,8 @@ import torch
+ from vllm.config import CacheConfig
+ from vllm.model_executor.layers.mamba.mamba_utils import (
+     MambaStateCopyFunc,
++    get_conv_copy_spec,
++    get_temporal_copy_spec,
+ )
+ from vllm.triton_utils import tl, triton
+ from vllm.utils.math_utils import cdiv
+@@ -133,6 +135,46 @@ def collect_mamba_copy_meta(
      copy_bufs.offset = offset
  
  
@@ -4466,11 +6241,16 @@ index c832389..4f236cd 100644
 +        attention = forward_context[layer_name]
 +        kv_caches: list[torch.Tensor] = attention.kv_cache
 +        for state, state_copy_func in zip(kv_caches, mamba_state_copy_funcs):
++            num_accepted_tokens = (
++                accept_token_bias + 1
++                if state_copy_func is get_conv_copy_spec
++                else 1
++            )
 +            copy_spec = state_copy_func(
 +                state,
 +                block_ids,
 +                0,
-+                accept_token_bias + 1,
++                num_accepted_tokens,
 +            )
 +            src_ptrs_np[offset] = copy_spec.start_addr
 +            dst_ptrs_np[offset] = state[dst_block_id].data_ptr()
@@ -4483,7 +6263,7 @@ index c832389..4f236cd 100644
  def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
      n = copy_bufs.offset
      if n == 0:
-@@ -144,6 +179,66 @@ def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
+@@ -144,6 +186,68 @@ def do_mamba_copy_block(copy_bufs: MambaCopyBuffers):
      )
  
  
@@ -4504,15 +6284,17 @@ index c832389..4f236cd 100644
 +    for capture in captures:
 +        assert capture.kv_cache_group_id in valid_group_ids
 +        req_state = requests[capture.request_id]
-+        collect_mamba_copy_meta(
++        block_ids = req_state.block_ids[capture.kv_cache_group_id]
++        src_block_id = block_ids[capture.src_block_index]
++        dst_block_id = block_ids[capture.dst_block_index]
++        collect_mamba_physical_copy_meta(
 +            copy_bufs,
 +            kv_cache_config,
 +            mamba_state_copy_funcs,
-+            [capture.kv_cache_group_id],
-+            capture.src_block_index,
-+            capture.dst_block_index,
++            capture.kv_cache_group_id,
++            src_block_id,
++            dst_block_id,
 +            capture.accept_token_bias,
-+            req_state,
 +            forward_context,
 +        )
 +    do_mamba_copy_block(copy_bufs)
@@ -4541,7 +6323,7 @@ index c832389..4f236cd 100644
 +            copy.kv_cache_group_id,
 +            copy.src_block_id,
 +            copy.dst_block_id,
-+            0,
++            copy.accept_token_bias,
 +            forward_context,
 +        )
 +    do_mamba_copy_block(copy_bufs)
