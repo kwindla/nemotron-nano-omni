@@ -787,6 +787,7 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
     cid = f"it-tool-{uuid.uuid4().hex[:8]}"
     salt = cid
     tool_payload = {"tools": [BASH_TOOL], "tool_choice": "auto"}
+    repo_root = str(ROOT)
 
     turn1_first = client.chat(
         [user("Use the bash tool to run pwd and report the output only.")],
@@ -797,7 +798,7 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
     )
     turn1_tool_call = extract_single_tool_call(turn1_first)
     turn1_final = client.chat(
-        [tool_message(turn1_tool_call["id"], "/home/khkramer/src/nemotron-nano-omni\n")],
+        [tool_message(turn1_tool_call["id"], f"{repo_root}\n")],
         conversation_id=cid,
         cache_salt=salt,
         max_tokens=32,
@@ -811,7 +812,7 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
         [
             user(
                 "Use the bash tool to run basename "
-                "/home/khkramer/src/nemotron-nano-omni and report the output only."
+                f"{repo_root} and report the output only."
             )
         ],
         conversation_id=cid,
@@ -852,7 +853,7 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
             f"expected at least 4 attach events for tool turns, saw {len(attach)}"
         )
 
-    if "/home/khkramer/src/nemotron-nano-omni" not in turn1_final.content:
+    if repo_root not in turn1_final.content:
         raise TestFailure(f"turn 1 tool follow-up output is wrong: {turn1_final.content!r}")
     if "nemotron-nano-omni" not in turn2_final.content:
         raise TestFailure(f"turn 2 tool follow-up output is wrong: {turn2_final.content!r}")

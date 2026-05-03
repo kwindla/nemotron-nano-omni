@@ -22,6 +22,8 @@ from aiortc.mediastreams import AudioStreamTrack
 from av import AudioFrame
 from loguru import logger
 
+ROOT = Path(__file__).resolve().parents[1]
+
 
 class WavThenSilenceTrack(AudioStreamTrack):
     """Audio track that sends one or more WAV turns separated by silence."""
@@ -202,7 +204,7 @@ def main():
     parser.add_argument("--run-secs", type=float, default=35.0)
     args = parser.parse_args()
     if not args.audio:
-        args.audio = ["/home/khkramer/src/nemotron-nano-omni/media/cartesia-unicorn.wav"]
+        args.audio = [str(ROOT / "media" / "cartesia-unicorn.wav")]
 
     logger.remove()
     logger.add(lambda message: print(message, end=""), level="INFO")

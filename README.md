@@ -17,8 +17,8 @@ Platform-specific runbooks, configs, scripts, and extra patches live in:
 
 ## Supported Platforms
 
-- [RTX 5090](/home/khkramer/src/nemotron-nano-omni/platforms/rtx5090/README.md)
-- [DGX Spark](/home/khkramer/src/nemotron-nano-omni/platforms/dgx_spark/README.md)
+- [RTX 5090](platforms/rtx5090/README.md)
+- [DGX Spark](platforms/dgx_spark/README.md)
 
 ## Shared Behavior
 
@@ -51,7 +51,7 @@ From there:
 - use the shared bot and ASR/TTS smokes from `scripts/`
 
 The shared vLLM checkout is still pinned at `v0.20.0` in
-[checkouts.lock.json](/home/khkramer/src/nemotron-nano-omni/checkouts.lock.json).
+[checkouts.lock.json](checkouts.lock.json).
 Platform patch stacks are additive on top of that checkout, so switching from
 one platform patch stack to another is easiest with a fresh `vllm-v0.20.0`
 checkout.

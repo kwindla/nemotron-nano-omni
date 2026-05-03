@@ -28,6 +28,7 @@ DEFAULT_AUDIO_DIR = ROOT / "media" / "cartesia-regression"
 DEFAULT_BOT_LOG = ROOT / "logs" / "bot.log"
 DEFAULT_VLLM_LOG = ROOT / "logs" / "dgx-spark-vllm.log"
 CONVERSATION_ID_MARKER = "Using Nemotron Omni conversation_id="
+REPO_ROOT_TOKEN = str(ROOT)
 
 
 @dataclass(frozen=True)
@@ -70,7 +71,7 @@ DEFAULT_ACTIONS = [
         label="text-followup-pwd",
         kind="text",
         content="What exact path did the previous command print? Reply with the path only.",
-        expect_substrings=("/home/khkramer/src/nemotron-nano-omni",),
+        expect_substrings=(REPO_ROOT_TOKEN,),
         audio_response=True,
     ),
     Action(

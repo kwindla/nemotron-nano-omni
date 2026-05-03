@@ -157,6 +157,19 @@ Mixed 20-turn end-to-end regression:
 .venv-pipecat/bin/python scripts/run_mixed_rtvi_regression.py
 ```
 
+Direct cached-vs-uncached parity suite against a live vLLM server:
+
+```bash
+PYTHONPATH=$PWD/src .venv-pipecat/bin/python scripts/run_direct_cache_state_suite.py \
+  --summary-json traces/direct-cache-state-suite-stable.json
+```
+
+Alternating live bot benchmark (`10` cached + `10` uncached runs):
+
+```bash
+PYTHONPATH=$PWD/src .venv-pipecat/bin/python scripts/run_prefix_cache_benchmark.py --pairs 10
+```
+
 This regression keeps one SmallWebRTC session open for 20 turns and mixes:
 
 - RTVI `send-text` turns
