@@ -7,17 +7,26 @@ source "${SCRIPT_DIR}/../config/env.sh"
 
 LOG_DIR="$(dirname "${NEMOTRON_VLLM_LOG}")"
 PID_FILE="${NEMOTRON_VLLM_PID}"
+READY_TIMEOUT_SECS="${NEMOTRON_VLLM_START_TIMEOUT_SECS}"
 
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="${CUDA_HOME}/bin:${PATH}"
 export TRITON_PTXAS_PATH="${TRITON_PTXAS_PATH:-${CUDA_HOME}/bin/ptxas}"
 
-run_server() {
+validate_env() {
   if [[ ! -x "${NEMOTRON_VLLM_BIN}" ]]; then
     echo "Missing vLLM executable at ${NEMOTRON_VLLM_BIN}" >&2
     echo "Build or point NEMOTRON_VLLM_BIN at a valid vLLM install." >&2
-    exit 1
+    return 1
   fi
+  if [[ ! -d "${NEMOTRON_MODEL_PATH}" ]]; then
+    echo "Missing model directory at ${NEMOTRON_MODEL_PATH}" >&2
+    return 1
+  fi
+}
+
+run_server() {
+  validate_env
 
   if [[ -d "${NEMOTRON_VLLM_VENV}" ]]; then
     # Keep the platform wrapper aligned with the installed environment.
@@ -93,22 +102,121 @@ is_running() {
   [[ -f "${PID_FILE}" ]] && kill -0 "$(cat "${PID_FILE}")" 2>/dev/null
 }
 
+remove_stale_pid_file() {
+  if [[ -f "${PID_FILE}" ]] && ! is_running; then
+    rm -f "${PID_FILE}"
+  fi
+}
+
+port_listener() {
+  ss -H -ltnp "( sport = :${NEMOTRON_VLLM_PORT} )" 2>/dev/null || true
+}
+
+is_ready() {
+  local models_url="${NEMOTRON_VLLM_BASE_URL}/models"
+  local response
+
+  response="$(curl -fsS --max-time 5 "${models_url}" 2>/dev/null || true)"
+  if [[ -z "${response}" ]]; then
+    return 1
+  fi
+
+  python3 -c 'import json, sys; payload=json.loads(sys.stdin.read()); model=sys.argv[1]; sys.exit(0 if any(item.get("id") == model for item in payload.get("data", [])) else 1)' \
+    "${NEMOTRON_VLLM_MODEL}" <<<"${response}"
+}
+
+wait_for_ready() {
+  local pid="$1"
+  local deadline=$((SECONDS + READY_TIMEOUT_SECS))
+
+  while (( SECONDS < deadline )); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      echo "vLLM exited before becoming ready." >&2
+      return 1
+    fi
+    if is_ready; then
+      return 0
+    fi
+    sleep 5
+  done
+
+  echo "Timed out after ${READY_TIMEOUT_SECS}s waiting for vLLM readiness." >&2
+  return 1
+}
+
+wait_for_pid_file() {
+  local deadline=$((SECONDS + 15))
+
+  while (( SECONDS < deadline )); do
+    if [[ -s "${PID_FILE}" ]]; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  echo "Timed out waiting for ${PID_FILE} to be written." >&2
+  return 1
+}
+
+print_failure_context() {
+  echo "Last 80 log lines from ${NEMOTRON_VLLM_LOG}:" >&2
+  tail -n 80 "${NEMOTRON_VLLM_LOG}" >&2 || true
+}
+
 command="${1:-start}"
 
 case "${command}" in
   start)
     mkdir -p "${LOG_DIR}"
+    validate_env
+    remove_stale_pid_file
+
     if is_running; then
-      echo "vLLM already running with pid $(cat "${PID_FILE}")"
+      if is_ready; then
+        echo "vLLM already running with pid $(cat "${PID_FILE}")"
+        exit 0
+      fi
+      echo "vLLM process $(cat "${PID_FILE}") is running but not ready yet"
       exit 0
     fi
-    nohup "${SCRIPT_PATH}" foreground >"${NEMOTRON_VLLM_LOG}" 2>&1 &
-    echo $! >"${PID_FILE}"
-    echo "Started vLLM with pid $(cat "${PID_FILE}")"
-    echo "Log: ${NEMOTRON_VLLM_LOG}"
+
+    if [[ -n "$(port_listener)" ]]; then
+      echo "Port ${NEMOTRON_VLLM_PORT} is already in use:" >&2
+      port_listener >&2
+      exit 1
+    fi
+
+    if [[ -f "${NEMOTRON_VLLM_LOG}" ]]; then
+      mv "${NEMOTRON_VLLM_LOG}" "${NEMOTRON_VLLM_LOG}.prev"
+    fi
+
+    rm -f "${PID_FILE}"
+    setsid -f bash "${SCRIPT_PATH}" detached >"${NEMOTRON_VLLM_LOG}" 2>&1 < /dev/null
+
+    if ! wait_for_pid_file; then
+      print_failure_context
+      exit 1
+    fi
+
+    if wait_for_ready "$(cat "${PID_FILE}")"; then
+      echo "Started vLLM with pid $(cat "${PID_FILE}")"
+      echo "Ready: ${NEMOTRON_VLLM_BASE_URL}/models"
+      echo "Log: ${NEMOTRON_VLLM_LOG}"
+    else
+      kill "$(cat "${PID_FILE}")" 2>/dev/null || true
+      wait "$(cat "${PID_FILE}")" 2>/dev/null || true
+      rm -f "${PID_FILE}"
+      print_failure_context
+      exit 1
+    fi
     ;;
   foreground)
     mkdir -p "${LOG_DIR}"
+    run_server
+    ;;
+  detached)
+    mkdir -p "${LOG_DIR}"
+    echo $$ >"${PID_FILE}"
     run_server
     ;;
   stop)
@@ -122,15 +230,28 @@ case "${command}" in
     fi
     ;;
   status)
+    remove_stale_pid_file
     if is_running; then
-      echo "vLLM is running with pid $(cat "${PID_FILE}")"
+      if is_ready; then
+        echo "vLLM is ready with pid $(cat "${PID_FILE}")"
+      else
+        echo "vLLM is running with pid $(cat "${PID_FILE}") but readiness has not passed yet"
+        exit 2
+      fi
+    elif [[ -n "$(port_listener)" ]]; then
+      echo "Port ${NEMOTRON_VLLM_PORT} is in use by an external process:" >&2
+      port_listener >&2
+      exit 1
     else
       echo "vLLM is not running"
       exit 1
     fi
     ;;
+  check-env)
+    validate_env
+    ;;
   *)
-    echo "Usage: ${SCRIPT_PATH} {start|foreground|stop|status}" >&2
+    echo "Usage: ${SCRIPT_PATH} {start|foreground|detached|stop|status|check-env}" >&2
     exit 1
     ;;
 esac

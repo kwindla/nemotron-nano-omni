@@ -48,8 +48,11 @@ setsid -f pocket-tts/.venv/bin/pocket-tts serve \
 vLLM:
 
 ```bash
-platforms/rtx5090/scripts/start_vllm.sh foreground
+platforms/rtx5090/scripts/start_vllm.sh check-env
+platforms/rtx5090/scripts/start_vllm.sh start
 ```
+
+Use `foreground` instead of `start` when you want logs in the current shell.
 
 Browser bot:
 

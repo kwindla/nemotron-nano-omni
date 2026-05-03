@@ -13,17 +13,13 @@ endpoint and streams text deltas back as Pipecat LLM frames.
 from __future__ import annotations
 
 import asyncio
-import audioop
-import base64
 import copy
 import hashlib
-import io
 import json
 import os
 import re
 import shlex
 import time
-import wave
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,10 +40,6 @@ from pipecat.frames.frames import (
     LLMFullResponseStartFrame,
     LLMRunFrame,
     StartFrame,
-    UserAudioRawFrame,
-    UserStoppedSpeakingFrame,
-    VADUserStartedSpeakingFrame,
-    VADUserStoppedSpeakingFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext, LLMSpecificMessage
@@ -169,11 +161,6 @@ class NemotronOmniAudioLLMService(LLMService):
     universal ``input_audio`` context parts into vLLM ``audio_url`` content
     parts, submits the full conversation to ``/v1/chat/completions``, and emits
     streamed ``LLMTextFrame`` output bounded by full-response frames.
-
-    For smoke tests or simple pipelines, direct audio-frame inference can still
-    be enabled with ``direct_audio_inference=True``. In normal Pipecat bots,
-    prefer a context collector that calls ``LLMContext.add_audio_frames_message``
-    at user-turn boundaries so every inference receives the full conversation.
     """
 
     Settings = NemotronOmniAudioLLMSettings
@@ -187,15 +174,8 @@ class NemotronOmniAudioLLMService(LLMService):
         model: str | None = None,
         settings: Settings | None = None,
         audio_passthrough: bool = False,
-        direct_audio_inference: bool = False,
         conversation_id: str | None = None,
         suffix_only_conversation: bool = True,
-        pre_speech_buffer_secs: float = 0.5,
-        min_audio_secs: float = 0.2,
-        enable_internal_vad: bool = True,
-        vad_rms_threshold: int = 300,
-        vad_start_secs: float = 0.08,
-        vad_stop_secs: float = 0.45,
         request_timeout_secs: float = 180.0,
         enable_bash_tool: bool = False,
         bash_tool_cwd: str | None = None,
@@ -213,20 +193,10 @@ class NemotronOmniAudioLLMService(LLMService):
             model: Model name exposed by vLLM.
             settings: Runtime-updatable LLM settings.
             audio_passthrough: Whether to pass input audio frames downstream.
-            direct_audio_inference: Whether raw audio/VAD frames should trigger
-                inference directly. Leave disabled when using LLMContextFrame.
             conversation_id: Optional stable id sent to vLLM for exact
                 conversation-cache reuse across turns.
             suffix_only_conversation: After the first successful cached turn,
                 send only the latest user message for the conversation id.
-            pre_speech_buffer_secs: Audio retained before VAD start to avoid
-                clipping the first phoneme.
-            min_audio_secs: Minimum captured audio duration before submitting.
-            enable_internal_vad: Whether to use RMS-based speech/silence
-                detection when upstream VAD frames are not present.
-            vad_rms_threshold: RMS threshold for the internal detector.
-            vad_start_secs: Speech duration required to start an internal turn.
-            vad_stop_secs: Silence duration required to stop an internal turn.
             request_timeout_secs: Total HTTP timeout for one streamed request.
             enable_bash_tool: Whether to expose the local ``run_bash`` tool.
             bash_tool_cwd: Working directory for bash tool calls.
@@ -267,15 +237,8 @@ class NemotronOmniAudioLLMService(LLMService):
         self._base_url = base_url.rstrip("/")
         self._chat_completions_url = f"{self._base_url}/chat/completions"
         self._audio_passthrough = audio_passthrough
-        self._direct_audio_inference = direct_audio_inference
         self._conversation_id = conversation_id
         self._suffix_only_conversation = suffix_only_conversation
-        self._pre_speech_buffer_secs = pre_speech_buffer_secs
-        self._min_audio_secs = min_audio_secs
-        self._enable_internal_vad = enable_internal_vad
-        self._vad_rms_threshold = vad_rms_threshold
-        self._vad_start_secs = vad_start_secs
-        self._vad_stop_secs = vad_stop_secs
         self._request_timeout_secs = request_timeout_secs
         self._enable_bash_tool = enable_bash_tool
         self._bash_tool_cwd = bash_tool_cwd or os.getcwd()
@@ -291,17 +254,6 @@ class NemotronOmniAudioLLMService(LLMService):
         trace_dir = os.getenv("NEMOTRON_OMNI_TRACE_DIR")
         self._trace_dir = Path(trace_dir) if trace_dir else None
         self._top_level_request_seq = 0
-
-        self._sample_rate = 16000
-        self._num_channels = 1
-        self._pre_speech_buffer = bytearray()
-        self._audio_buffer = bytearray()
-        self._user_speaking = False
-        self._utterance_submitted = False
-        self._last_user_id = ""
-        self._external_vad_seen = False
-        self._internal_speech_secs = 0.0
-        self._internal_silence_secs = 0.0
 
     def can_generate_metrics(self) -> bool:
         """Return whether the service emits processing, TTFB, and usage metrics."""
@@ -323,7 +275,6 @@ class NemotronOmniAudioLLMService(LLMService):
     async def start(self, frame: StartFrame):
         """Start the service and initialize the HTTP client."""
         await super().start(frame)
-        self._sample_rate = frame.audio_in_sample_rate
         if not self._session:
             timeout = aiohttp.ClientTimeout(total=self._request_timeout_secs)
             self._session = aiohttp.ClientSession(timeout=timeout)
@@ -347,25 +298,10 @@ class NemotronOmniAudioLLMService(LLMService):
         if isinstance(frame, LLMContextFrame):
             await self._handle_context_frame(frame.context)
         elif isinstance(frame, InputAudioRawFrame):
-            if self._direct_audio_inference:
-                await self._handle_audio_frame(frame)
             if self._audio_passthrough:
                 await self.push_frame(frame, direction)
-        elif isinstance(frame, VADUserStartedSpeakingFrame):
-            if self._direct_audio_inference:
-                await self._handle_user_started_speaking(external=True)
-            await self.push_frame(frame, direction)
-        elif isinstance(frame, VADUserStoppedSpeakingFrame):
-            if self._direct_audio_inference:
-                await self._handle_user_stopped_speaking(frame)
-            await self.push_frame(frame, direction)
-        elif isinstance(frame, UserStoppedSpeakingFrame):
-            if self._direct_audio_inference:
-                await self._handle_user_turn_stopped()
-            await self.push_frame(frame, direction)
         elif isinstance(frame, InterruptionFrame):
             await self._cancel_generation_task()
-            self._reset_audio_buffers()
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMRunFrame):
             logger.debug(f"{self}: ignoring {frame.name}; LLMContextFrame triggers inference")
@@ -384,12 +320,11 @@ class NemotronOmniAudioLLMService(LLMService):
             return
 
         await self._cancel_generation_task()
-        self._reset_audio_buffers()
-
-        payload = self._build_payload_from_messages(canonical_messages)
+        payload, full_messages = self._build_payload_from_messages(canonical_messages)
         self._generation_task = self.create_task(
             self._run_completion_payload(
                 payload,
+                full_messages=full_messages,
                 request_description=(
                     f"context with {len(payload['messages'])} messages and "
                     f"{self._count_audio_parts(payload['messages'])} audio parts"
@@ -398,129 +333,6 @@ class NemotronOmniAudioLLMService(LLMService):
             ),
             name="nemotron_omni_context_completion",
         )
-
-    async def _handle_audio_frame(self, frame: InputAudioRawFrame):
-        if not frame.audio:
-            return
-
-        self._sample_rate = frame.sample_rate
-        self._num_channels = frame.num_channels
-        if isinstance(frame, UserAudioRawFrame):
-            self._last_user_id = frame.user_id
-
-        await self._process_internal_vad(frame)
-
-        if self._user_speaking:
-            self._audio_buffer.extend(frame.audio)
-        else:
-            self._append_pre_speech_audio(frame.audio)
-
-    async def _handle_user_started_speaking(self, *, external: bool = False):
-        if external:
-            self._external_vad_seen = True
-        self._internal_speech_secs = 0.0
-        self._internal_silence_secs = 0.0
-        if self._user_speaking:
-            return
-
-        await self._cancel_generation_task()
-        self._user_speaking = True
-        self._utterance_submitted = False
-        self._audio_buffer = bytearray(self._pre_speech_buffer)
-        self._pre_speech_buffer.clear()
-
-    async def _handle_user_stopped_speaking(self, frame: VADUserStoppedSpeakingFrame):
-        self._external_vad_seen = True
-        self._internal_speech_secs = 0.0
-        self._internal_silence_secs = 0.0
-        self._user_speaking = False
-        if frame.stop_secs:
-            speech_end_time = frame.timestamp - frame.stop_secs
-            await self.start_ttfb_metrics(start_time=speech_end_time)
-        await self._submit_current_utterance()
-
-    async def _handle_internal_user_stopped_speaking(self):
-        self._user_speaking = False
-        await self.start_ttfb_metrics(start_time=time.time() - self._internal_silence_secs)
-        self._internal_speech_secs = 0.0
-        self._internal_silence_secs = 0.0
-        await self._submit_current_utterance()
-
-    async def _handle_user_turn_stopped(self):
-        self._user_speaking = False
-        await self._submit_current_utterance()
-
-    async def _process_internal_vad(self, frame: InputAudioRawFrame):
-        if not self._enable_internal_vad or self._external_vad_seen:
-            return
-
-        duration_secs = frame.num_frames / frame.sample_rate if frame.sample_rate else 0
-        rms = audioop.rms(frame.audio, 2) if len(frame.audio) >= 2 else 0
-        has_speech = rms >= self._vad_rms_threshold
-
-        if self._user_speaking:
-            if has_speech:
-                self._internal_silence_secs = 0.0
-            else:
-                self._internal_silence_secs += duration_secs
-                if self._internal_silence_secs >= self._vad_stop_secs:
-                    logger.debug(
-                        f"{self}: internal VAD stop after "
-                        f"{self._internal_silence_secs:.3f}s silence"
-                    )
-                    await self._handle_internal_user_stopped_speaking()
-            return
-
-        if has_speech:
-            self._internal_speech_secs += duration_secs
-            if self._internal_speech_secs >= self._vad_start_secs:
-                logger.debug(f"{self}: internal VAD start at RMS {rms}")
-                await self._handle_user_started_speaking()
-        else:
-            self._internal_speech_secs = 0.0
-
-    async def _submit_current_utterance(self):
-        if self._utterance_submitted:
-            return
-
-        audio = bytes(self._audio_buffer)
-        if len(audio) < self._min_audio_bytes:
-            logger.debug(
-                f"{self}: captured audio too short for inference "
-                f"({len(audio)} bytes, minimum {self._min_audio_bytes})"
-            )
-            self._reset_audio_buffers()
-            return
-
-        self._utterance_submitted = True
-        self._audio_buffer.clear()
-
-        if self._generation_task and not self._generation_task.done():
-            await self._cancel_generation_task()
-
-        self._generation_task = self.create_task(
-            self._run_audio_completion(audio, self._sample_rate, self._num_channels),
-            name="nemotron_omni_audio_completion",
-        )
-
-    @property
-    def _min_audio_bytes(self) -> int:
-        return int(self._sample_rate * self._num_channels * 2 * self._min_audio_secs)
-
-    def _append_pre_speech_audio(self, audio: bytes):
-        self._pre_speech_buffer.extend(audio)
-        max_bytes = int(self._sample_rate * self._num_channels * 2 * self._pre_speech_buffer_secs)
-        if max_bytes > 0 and len(self._pre_speech_buffer) > max_bytes:
-            del self._pre_speech_buffer[: len(self._pre_speech_buffer) - max_bytes]
-
-    def _reset_audio_buffers(self):
-        self._user_speaking = False
-        self._utterance_submitted = False
-        self._audio_buffer.clear()
-        self._pre_speech_buffer.clear()
-        self._external_vad_seen = False
-        self._internal_speech_secs = 0.0
-        self._internal_silence_secs = 0.0
 
     async def _cancel_generation_task(self):
         if self._generation_task:
@@ -532,25 +344,17 @@ class NemotronOmniAudioLLMService(LLMService):
             await self._session.close()
             self._session = None
 
-    def _wav_data_url(self, audio: bytes, sample_rate: int, num_channels: int) -> str:
-        content = io.BytesIO()
-        with wave.open(content, "wb") as wav:
-            wav.setsampwidth(2)
-            wav.setnchannels(num_channels)
-            wav.setframerate(sample_rate)
-            wav.writeframes(audio)
-        encoded = base64.b64encode(content.getvalue()).decode("ascii")
-        return f"data:audio/wav;base64,{encoded}"
-
-    def _build_payload_from_messages(self, messages: list[dict[str, Any]]) -> dict[str, Any]:
+    def _build_payload_from_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         full_messages = copy.deepcopy(messages)
-        messages, requires_cache = self._conversation_payload_messages(messages)
+        payload_messages, requires_cache = self._conversation_payload_messages(full_messages)
         payload: dict[str, Any] = {
             "model": self._settings.model,
-            "messages": messages,
+            "messages": payload_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
-            "_conversation_full_messages": full_messages,
         }
         if requires_cache:
             payload["conversation_require_cache"] = True
@@ -581,7 +385,7 @@ class NemotronOmniAudioLLMService(LLMService):
         if self._conversation_id:
             payload["conversation_id"] = self._conversation_id
 
-        return payload
+        return payload, full_messages
 
     def _conversation_payload_messages(
         self,
@@ -592,7 +396,7 @@ class NemotronOmniAudioLLMService(LLMService):
             or not self._suffix_only_conversation
             or not self._conversation_cache_committed
         ):
-            return messages, False
+            return copy.deepcopy(messages), False
 
         latest_user = self._latest_user_message(messages)
         if latest_user is None:
@@ -600,7 +404,7 @@ class NemotronOmniAudioLLMService(LLMService):
                 f"{self}: suffix-only conversation mode found no user message; "
                 "sending full context"
             )
-            return messages, False
+            return copy.deepcopy(messages), False
 
         logger.debug(
             f"{self}: suffix-only conversation payload uses latest user message "
@@ -617,31 +421,6 @@ class NemotronOmniAudioLLMService(LLMService):
                 continue
             return copy.deepcopy(message)
         return None
-
-    def _build_payload(self, audio_url: str) -> dict[str, Any]:
-        messages: list[dict[str, Any]] = []
-        if self._settings.system_instruction:
-            messages.append({"role": "system", "content": self._settings.system_instruction})
-
-        content: list[dict[str, Any]] = []
-        if self._settings.audio_prompt:
-            content.append({"type": "text", "text": self._settings.audio_prompt})
-        content.append({"type": "audio_url", "audio_url": {"url": audio_url}})
-        messages.append({"role": "user", "content": content})
-
-        return self._build_payload_from_messages(messages)
-
-    def _build_payload_from_context_messages(self, context_messages: list[Any]) -> dict[str, Any]:
-        messages: list[dict[str, Any]] = []
-        if self._settings.system_instruction:
-            messages.append({"role": "system", "content": self._settings.system_instruction})
-
-        for message in context_messages:
-            converted = self._convert_context_message(message)
-            if converted:
-                messages.append(converted)
-
-        return self._build_payload_from_messages(messages)
 
     def _convert_context_message(self, message: Any) -> dict[str, Any] | None:
         if isinstance(message, LLMSpecificMessage):
@@ -760,15 +539,10 @@ class NemotronOmniAudioLLMService(LLMService):
 
     def _commit_canonical_messages(
         self,
-        payload: dict[str, Any],
+        full_messages: list[dict[str, Any]],
         *,
         assistant_text: str,
     ) -> None:
-        full_messages = payload.get("_conversation_full_messages")
-        if not isinstance(full_messages, list):
-            logger.warning(f"{self}: cannot commit canonical messages without full messages")
-            return
-
         committed_messages = self._with_system_message(full_messages)
         if assistant_text:
             committed_messages.append({"role": "assistant", "content": assistant_text})
@@ -850,21 +624,11 @@ class NemotronOmniAudioLLMService(LLMService):
         except Exception as exc:
             logger.warning(f"{self}: failed to write trace file for {trace_id}: {exc}")
 
-    async def _run_audio_completion(self, audio: bytes, sample_rate: int, num_channels: int):
-        payload = self._build_payload(self._wav_data_url(audio, sample_rate, num_channels))
-        await self._run_completion_payload(
-            payload,
-            request_description=(
-                f"{len(audio)} bytes of {sample_rate} Hz audio "
-                f"to {self._chat_completions_url}"
-            ),
-            start_ttfb=False,
-        )
-
     async def _run_completion_payload(
         self,
         payload: dict[str, Any],
         *,
+        full_messages: list[dict[str, Any]],
         request_description: str,
         start_ttfb: bool,
     ):
@@ -901,6 +665,7 @@ class NemotronOmniAudioLLMService(LLMService):
             logger.debug(f"{self}: sending {request_description}{cache_info}")
 
             current_payload = copy.deepcopy(payload)
+            current_full_messages = copy.deepcopy(full_messages)
             retried_full_context = False
             attempt_num = 0
             while True:
@@ -929,9 +694,7 @@ class NemotronOmniAudioLLMService(LLMService):
                             attempt_messages
                         ),
                         "http_payload": http_payload,
-                        "conversation_full_messages": current_payload.get(
-                            "_conversation_full_messages"
-                        ),
+                        "conversation_full_messages": current_full_messages,
                     },
                 )
                 try:
@@ -944,9 +707,10 @@ class NemotronOmniAudioLLMService(LLMService):
                 except ConversationCacheMissError:
                     if retried_full_context:
                         raise
-                    full_payload = self._full_context_retry_payload(current_payload)
-                    if full_payload is None:
-                        raise
+                    full_payload = self._full_context_retry_payload(
+                        current_payload,
+                        current_full_messages,
+                    )
                     recovered_from_cache_miss = True
                     retried_full_context = True
                     current_payload = full_payload
@@ -983,8 +747,9 @@ class NemotronOmniAudioLLMService(LLMService):
                     result.tool_calls,
                     seen_tool_results_by_signature=seen_tool_results_by_signature,
                 )
-                current_payload = self._payload_after_tool_calls(
+                current_payload, current_full_messages = self._payload_after_tool_calls(
                     current_payload,
+                    current_full_messages,
                     assistant_text=result.output_text,
                     tool_calls=result.tool_calls,
                     tool_messages=tool_messages,
@@ -992,7 +757,7 @@ class NemotronOmniAudioLLMService(LLMService):
 
             completed = True
             self._commit_canonical_messages(
-                current_payload,
+                current_full_messages,
                 assistant_text=final_assistant_text,
             )
             if self._conversation_id:
@@ -1007,10 +772,10 @@ class NemotronOmniAudioLLMService(LLMService):
                 f"{''.join(output_text_parts)!r}"
             )
         except asyncio.CancelledError:
-            logger.debug(f"{self}: audio completion cancelled")
+            logger.debug(f"{self}: completion cancelled")
             raise
         except Exception as e:
-            logger.error(f"{self}: audio completion failed: {e}")
+            logger.error(f"{self}: completion failed: {e}")
             await self.push_frame(ErrorFrame(error=str(e)))
         finally:
             if not completed and self._conversation_id:
@@ -1126,14 +891,8 @@ class NemotronOmniAudioLLMService(LLMService):
     def _full_context_retry_payload(
         self,
         payload: dict[str, Any],
-    ) -> dict[str, Any] | None:
-        full_messages = payload.get("_conversation_full_messages")
-        if not isinstance(full_messages, list):
-            logger.warning(
-                f"{self}: cannot retry conversation cache miss without full messages"
-            )
-            return None
-
+        full_messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         retry_payload = copy.deepcopy(payload)
         retry_payload["messages"] = copy.deepcopy(full_messages)
         retry_payload.pop("conversation_require_cache", None)
@@ -1188,22 +947,21 @@ class NemotronOmniAudioLLMService(LLMService):
     def _payload_after_tool_calls(
         self,
         payload: dict[str, Any],
+        full_messages: list[dict[str, Any]],
         assistant_text: str,
         tool_calls: list[dict[str, Any]],
         tool_messages: list[dict[str, Any]],
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         assistant_tool_call_message = self._assistant_tool_call_message(
             tool_calls,
             assistant_text=assistant_text,
         )
         next_payload = copy.deepcopy(payload)
-        full_messages = next_payload.get("_conversation_full_messages")
-        if isinstance(full_messages, list):
-            next_payload["_conversation_full_messages"] = [
-                *copy.deepcopy(full_messages),
-                assistant_tool_call_message,
-                *copy.deepcopy(tool_messages),
-            ]
+        next_full_messages = [
+            *copy.deepcopy(full_messages),
+            assistant_tool_call_message,
+            *copy.deepcopy(tool_messages),
+        ]
         if self._conversation_id:
             # After a successful tool-call round, vLLM has already committed the
             # prefix through the assistant tool-call message. Send only the new
@@ -1220,7 +978,7 @@ class NemotronOmniAudioLLMService(LLMService):
         # Keep tool definitions stable across tool-followup requests. vLLM feeds
         # `tools` into the chat template, so removing them shrinks the prompt and
         # breaks exact conversation-cache attach on the next round.
-        return next_payload
+        return next_payload, next_full_messages
 
     @staticmethod
     def _assistant_tool_call_message(

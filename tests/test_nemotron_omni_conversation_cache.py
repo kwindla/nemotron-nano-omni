@@ -44,13 +44,13 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
 
     def test_payload_after_tool_calls_uses_tool_suffix_with_conversation_cache(self) -> None:
         service = self._make_service()
+        full_messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Count the files."},
+        ]
         payload = {
             "model": "nemotron_3_nano_omni",
             "messages": [{"role": "user", "content": "Count the files."}],
-            "_conversation_full_messages": [
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Count the files."},
-            ],
             "tools": [copy.deepcopy(BASH_TOOL_DEFINITION)],
             "tool_choice": "auto",
             "conversation_require_cache": True,
@@ -71,8 +71,9 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-        next_payload = service._payload_after_tool_calls(
+        next_payload, next_full_messages = service._payload_after_tool_calls(
             payload,
+            full_messages,
             assistant_text="\n",
             tool_calls=tool_calls,
             tool_messages=tool_messages,
@@ -82,28 +83,29 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next_payload["tool_choice"], "auto")
         self.assertTrue(next_payload["conversation_require_cache"])
         self.assertEqual(next_payload["messages"], tool_messages)
+        self.assertNotIn("_conversation_full_messages", next_payload)
         self.assertEqual(
-            next_payload["_conversation_full_messages"][-2]["tool_calls"],
+            next_full_messages[-2]["tool_calls"],
             tool_calls,
         )
         self.assertEqual(
-            next_payload["_conversation_full_messages"][-2]["content"],
+            next_full_messages[-2]["content"],
             "\n",
         )
         self.assertEqual(
-            next_payload["_conversation_full_messages"][-1],
+            next_full_messages[-1],
             tool_messages[0],
         )
 
     def test_payload_after_tool_calls_keeps_full_history_without_conversation_id(self) -> None:
         service = self._make_service(conversation_id=None)
+        full_messages = [
+            {"role": "system", "content": "You are helpful."},
+            {"role": "user", "content": "Count the files."},
+        ]
         payload = {
             "model": "nemotron_3_nano_omni",
             "messages": [{"role": "user", "content": "Count the files."}],
-            "_conversation_full_messages": [
-                {"role": "system", "content": "You are helpful."},
-                {"role": "user", "content": "Count the files."},
-            ],
             "tools": [copy.deepcopy(BASH_TOOL_DEFINITION)],
             "tool_choice": "auto",
         }
@@ -123,28 +125,27 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
             }
         ]
 
-        next_payload = service._payload_after_tool_calls(
+        next_payload, next_full_messages = service._payload_after_tool_calls(
             payload,
+            full_messages,
             assistant_text="\n",
             tool_calls=tool_calls,
             tool_messages=tool_messages,
         )
 
+        self.assertNotIn("_conversation_full_messages", next_payload)
         self.assertEqual(next_payload["messages"][-2]["role"], "assistant")
         self.assertEqual(next_payload["messages"][-2]["tool_calls"], tool_calls)
         self.assertEqual(next_payload["messages"][-2]["content"], "\n")
         self.assertEqual(next_payload["messages"][-1], tool_messages[0])
+        self.assertEqual(next_full_messages[-1], tool_messages[0])
 
     def test_commit_canonical_messages_preserves_system_message(self) -> None:
         service = self._make_service(conversation_id=None)
-        payload = {
-            "_conversation_full_messages": [
-                {"role": "user", "content": "Hello"},
-            ]
-        }
+        full_messages = [{"role": "user", "content": "Hello"}]
 
         service._commit_canonical_messages(
-            payload,
+            full_messages,
             assistant_text="world",
         )
 
@@ -196,8 +197,11 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
             executed_codes.append(arguments)
             return "tool result"
 
+        async def capture_event(payload):
+            events.append(payload)
+
         service._execute_tool_call = fake_execute_tool_call  # type: ignore[method-assign]
-        service._bash_tool_event_sender = events.append  # type: ignore[assignment]
+        service._bash_tool_event_sender = capture_event  # type: ignore[assignment]
 
         tool_calls = [
             {
@@ -269,8 +273,11 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         async def should_not_run_bash(*args, **kwargs):
             raise AssertionError("bash subprocess should not run for long prose echo")
 
+        async def capture_event(payload):
+            events.append(payload)
+
         service._run_bash_tool = should_not_run_bash  # type: ignore[method-assign]
-        service._bash_tool_event_sender = events.append  # type: ignore[assignment]
+        service._bash_tool_event_sender = capture_event  # type: ignore[assignment]
 
         result = await service._execute_tool_call(
             {
@@ -387,6 +394,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
 
         await service._run_completion_payload(
             payload,
+            full_messages=copy.deepcopy(payload["messages"]),
             request_description="test request",
             start_ttfb=False,
         )
@@ -421,12 +429,12 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         payload = {
             "model": "nemotron_3_nano_omni",
             "messages": [{"role": "user", "content": "Suffix-only turn"}],
-            "_conversation_full_messages": copy.deepcopy(full_messages),
             "conversation_require_cache": True,
         }
 
         await service._run_completion_payload(
             payload,
+            full_messages=copy.deepcopy(full_messages),
             request_description="suffix-only request",
             start_ttfb=False,
         )
