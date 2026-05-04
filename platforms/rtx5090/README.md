@@ -9,6 +9,7 @@ conversation-cache patch path.
 ```bash
 source platforms/rtx5090/config/env.sh
 platforms/rtx5090/scripts/apply_vllm_patches.sh
+python3 platforms/common/scripts/patch_nemotron_chat_template.py "$NEMOTRON_MODEL_PATH"
 ```
 
 The env file sets the shared defaults used by:
@@ -21,12 +22,24 @@ The env file sets the shared defaults used by:
 
 - model: `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4`
 - served model name: `nemotron_3_nano_omni`
-- context length: `4096`
+- context length: `32768`
 - sequence budget: `1`
+- max batched tokens: `8192`
+- vLLM native prefix caching disabled; the custom conversation cache must remain
+  independent of vLLM's block-prefix cache
+- Mamba cache mode: `align`
+- Mamba cache dtype: `float32`; RTX NVFP4 direct parity drifted with the default
+  lower-precision Mamba cache state, and `float32` requires
+  `max-num-batched-tokens >= 4240`
+- KV cache budget: no explicit `NEMOTRON_VLLM_KV_CACHE_MEMORY_BYTES` by default;
+  the previous `2G` setting was only a tight-memory diagnostic profile
 - bot sampling defaults aligned to the Nano Omni model-card instruct mode:
   `temperature=0.2`, `top_k=1`, `max_tokens=1024`, reasoning disabled
 - exact conversation cache enabled with the 5090 headroom settings from the
   original browser runbook
+- the model chat template is patched so assistant tool-call history renders
+  `</tool_call><|im_end|>` without an extra newline; this keeps generated
+  tool-call tokens round-trippable through the next cached prompt render
 
 ## Start Services
 
@@ -73,8 +86,17 @@ Prefix cache smoke:
 
 ```bash
 platforms/rtx5090/scripts/run_prefix_cache_smoke.sh \
+  --reuse-server \
   --log "$NEMOTRON_VLLM_LOG" \
   --results-json logs/rtx5090-prefix-cache-results.json
+```
+
+Mixed 20-turn end-to-end benchmark:
+
+```bash
+PYTHONPATH=$PWD/src .venv-pipecat/bin/python scripts/run_prefix_cache_benchmark.py \
+  --platform rtx5090 \
+  --pairs 10
 ```
 
 Shared bot smoke:

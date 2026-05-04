@@ -23,7 +23,7 @@ from typing import Any
 
 
 ROOT = Path(__file__).resolve().parents[1]
-ENV_SCRIPT = ROOT / "platforms" / "dgx_spark" / "config" / "env.sh"
+DEFAULT_PLATFORM = os.getenv("NEMOTRON_PLATFORM") or "dgx_spark"
 START_BOT_SCRIPT = ROOT / "scripts" / "start_bot.sh"
 REGRESSION_SCRIPT = ROOT / "scripts" / "run_mixed_rtvi_regression.py"
 PIPECAT_PYTHON = ROOT / ".venv-pipecat" / "bin" / "python"
@@ -76,6 +76,20 @@ def parse_args() -> argparse.Namespace:
         help="Optional benchmark output directory. Defaults to benchmarks/<timestamp>.",
     )
     parser.add_argument(
+        "--platform",
+        choices=("rtx5090", "dgx_spark"),
+        default=DEFAULT_PLATFORM,
+        help=(
+            "Platform env profile to source. Defaults to NEMOTRON_PLATFORM, "
+            "or dgx_spark when unset."
+        ),
+    )
+    parser.add_argument(
+        "--env-script",
+        type=Path,
+        help="Optional explicit env.sh path. Overrides --platform.",
+    )
+    parser.add_argument(
         "--vllm-ready-timeout-secs",
         type=float,
         default=60.0,
@@ -94,8 +108,12 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_spark_env() -> dict[str, str]:
-    command = f"source {shlex.quote(str(ENV_SCRIPT))} >/dev/null 2>&1 && env -0"
+def platform_env_script(platform: str) -> Path:
+    return ROOT / "platforms" / platform / "config" / "env.sh"
+
+
+def load_platform_env(env_script: Path) -> dict[str, str]:
+    command = f"source {shlex.quote(str(env_script))} >/dev/null 2>&1 && env -0"
     output = subprocess.check_output(["bash", "-lc", command], cwd=ROOT)
     env = os.environ.copy()
     for item in output.split(b"\0"):
@@ -766,11 +784,17 @@ def write_report(out_root: Path, report: dict[str, Any]) -> None:
 
 def main() -> int:
     args = parse_args()
+    env_script = args.env_script or platform_env_script(args.platform)
+    if not env_script.is_file():
+        raise FileNotFoundError(f"missing platform env script: {env_script}")
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-    out_root = args.out_dir or ROOT / "benchmarks" / f"conversation-cache-{timestamp}"
+    out_root = (
+        args.out_dir
+        or ROOT / "benchmarks" / f"{args.platform}-conversation-cache-{timestamp}"
+    )
     out_root.mkdir(parents=True, exist_ok=True)
 
-    base_env = load_spark_env()
+    base_env = load_platform_env(env_script)
     bot_pid_path = out_root / "shared" / "benchmark-bot.pid"
     bot_pid_path.parent.mkdir(parents=True, exist_ok=True)
     run_order: list[dict[str, Any]] = []

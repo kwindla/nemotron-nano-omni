@@ -108,6 +108,10 @@ DEFAULT_ENABLE_PREFIX_CACHING = _env_bool(
     "NEMOTRON_VLLM_ENABLE_PREFIX_CACHING", True
 )
 DEFAULT_MAMBA_CACHE_MODE = _env_str("NEMOTRON_VLLM_MAMBA_CACHE_MODE", "align")
+DEFAULT_MAMBA_CACHE_DTYPE = _env_str("NEMOTRON_VLLM_MAMBA_CACHE_DTYPE", "auto")
+DEFAULT_MAMBA_SSM_CACHE_DTYPE = _env_str(
+    "NEMOTRON_VLLM_MAMBA_SSM_CACHE_DTYPE", "auto"
+)
 DEFAULT_MAMBA_BACKEND = _env_str("NEMOTRON_VLLM_MAMBA_BACKEND", "triton")
 DEFAULT_ATTENTION_BACKEND = os.getenv("NEMOTRON_VLLM_ATTENTION_BACKEND")
 DEFAULT_KV_CACHE_MEMORY_BYTES = os.getenv("NEMOTRON_VLLM_KV_CACHE_MEMORY_BYTES")
@@ -273,6 +277,10 @@ def vllm_command(args: argparse.Namespace) -> list[str]:
         command.append("--no-enable-prefix-caching")
     if args.mamba_cache_mode:
         command.extend(["--mamba-cache-mode", args.mamba_cache_mode])
+    if args.mamba_cache_dtype and args.mamba_cache_dtype != "auto":
+        command.extend(["--mamba-cache-dtype", args.mamba_cache_dtype])
+    if args.mamba_ssm_cache_dtype and args.mamba_ssm_cache_dtype != "auto":
+        command.extend(["--mamba-ssm-cache-dtype", args.mamba_ssm_cache_dtype])
     if args.mamba_backend:
         command.extend(["--mamba-backend", args.mamba_backend])
     return command
@@ -823,7 +831,11 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
             "conversation_require_cache": True,
         },
     )
-    turn2_tool_call = extract_single_tool_call(turn2_first)
+    turn2_message = turn2_first.raw["choices"][0]["message"] if turn2_first.raw else {}
+    turn2_tool_calls = turn2_message.get("tool_calls") or []
+    if len(turn2_tool_calls) != 1:
+        raise TestFailure(f"expected exactly one tool call, got: {turn2_message!r}")
+    turn2_tool_call = turn2_tool_calls[0]
     turn2_final = client.chat(
         [tool_message(turn2_tool_call["id"], "nemotron-nano-omni\n")],
         conversation_id=cid,
@@ -994,23 +1006,24 @@ def median(values: list[float | None]) -> float | None:
 def run_perf_test(client: VllmClient, log_path: Path, repeats: int) -> TestResult:
     name = "ttft_tps_cached_vs_uncached"
     offset = log_offset(log_path)
-    cid = f"it-perf-{uuid.uuid4().hex[:8]}"
-    salt = cid
     setup = long_prefix_text()
-    first = client.chat(
-        [user(setup)],
-        conversation_id=cid,
-        cache_salt=salt,
-        max_tokens=16,
-    )
     question = (
         "Using the remembered ledger, answer in one concise sentence with the "
         "project codename, routing city, checksum color, and operator phrase."
     )
-    history = [user(setup), assistant(first.content), user(question)]
     cached_runs: list[ChatResult] = []
     uncached_runs: list[ChatResult] = []
+    cached_conversation_ids: list[str] = []
     for _ in range(repeats):
+        cid = f"it-perf-{uuid.uuid4().hex[:8]}"
+        salt = cid
+        first = client.chat(
+            [user(setup)],
+            conversation_id=cid,
+            cache_salt=salt,
+            max_tokens=16,
+        )
+        history = [user(setup), assistant(first.content), user(question)]
         cached_runs.append(
             client.stream_chat(
                 history,
@@ -1019,7 +1032,14 @@ def run_perf_test(client: VllmClient, log_path: Path, repeats: int) -> TestResul
                 max_tokens=80,
             )
         )
+        cached_conversation_ids.append(cid)
     for _ in range(repeats):
+        first = client.chat(
+            [user(setup)],
+            cache_salt=f"uncached-setup-{uuid.uuid4().hex}",
+            max_tokens=16,
+        )
+        history = [user(setup), assistant(first.content), user(question)]
         uncached_runs.append(
             client.stream_chat(
                 history,
@@ -1027,7 +1047,22 @@ def run_perf_test(client: VllmClient, log_path: Path, repeats: int) -> TestResul
                 max_tokens=80,
             )
         )
-    attach = assert_attached(log_path, offset, cid)
+
+    log_text = read_log_from(log_path, offset)
+    assert_no_server_errors(log_text)
+    for cid in cached_conversation_ids:
+        assert_no_attach_skips(log_path, offset, cid)
+    attach_by_conversation = {
+        cid: attach_lines(log_text, cid) for cid in cached_conversation_ids
+    }
+    missing_attach = [
+        cid for cid, attach in attach_by_conversation.items() if not attach
+    ]
+    if missing_attach:
+        raise TestFailure(
+            "no conversation-cache attach log for perf conversation(s): "
+            + ", ".join(missing_attach)
+        )
 
     cached_ttft = median([r.ttft for r in cached_runs])
     uncached_ttft = median([r.ttft for r in uncached_runs])
@@ -1055,7 +1090,7 @@ def run_perf_test(client: VllmClient, log_path: Path, repeats: int) -> TestResul
             "uncached_tps_median": uncached_tps,
             "cached_outputs": [normalize_text(r.content) for r in cached_runs],
             "uncached_outputs": [normalize_text(r.content) for r in uncached_runs],
-            "attach": attach,
+            "attach_by_conversation": attach_by_conversation,
         },
     )
 
@@ -1210,6 +1245,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mamba-cache-mode",
         default=DEFAULT_MAMBA_CACHE_MODE,
+    )
+    parser.add_argument(
+        "--mamba-cache-dtype",
+        default=DEFAULT_MAMBA_CACHE_DTYPE,
+    )
+    parser.add_argument(
+        "--mamba-ssm-cache-dtype",
+        default=DEFAULT_MAMBA_SSM_CACHE_DTYPE,
     )
     parser.add_argument(
         "--mamba-backend",

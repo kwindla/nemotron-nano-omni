@@ -27,3 +27,4 @@ conversation-prefix-cache*-results.json
 /media/*
 !/media/cartesia-unicorn.wav
 !/media/cartesia-unicorn-followup.wav
+!/media/cache_image_test.png

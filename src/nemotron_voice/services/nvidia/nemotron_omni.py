@@ -47,6 +47,8 @@ from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import LLMService
 from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
 
+_TRACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
+
 DEFAULT_VOICE_SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant. Respond in plain text only. Keep answers "
     "brief, direct, and conversational, usually one or two short sentences. Your "
@@ -604,7 +606,11 @@ class NemotronOmniAudioLLMService(LLMService):
             return
         try:
             self._trace_dir.mkdir(parents=True, exist_ok=True)
-            trace_path = self._trace_dir / f"{trace_id}.{phase}.json"
+            safe_trace_id = _TRACE_NAME_RE.sub("_", Path(str(trace_id)).name)
+            safe_phase = _TRACE_NAME_RE.sub("_", Path(str(phase)).name)
+            if not safe_trace_id or not safe_phase:
+                return
+            trace_path = self._trace_dir / f"{safe_trace_id}.{safe_phase}.json"
             trace_payload = {
                 "trace_id": trace_id,
                 "phase": phase,
@@ -963,10 +969,10 @@ class NemotronOmniAudioLLMService(LLMService):
             *copy.deepcopy(tool_messages),
         ]
         if self._conversation_id:
-            # After a successful tool-call round, vLLM has already committed the
-            # prefix through the assistant tool-call message. Send only the new
-            # tool-result suffix and require cache so we do not duplicate the
-            # user/tool-call messages inside the same top-level turn.
+            # vLLM's frontend ledger reconstructs the assistant tool-call
+            # message. The engine cache physically commits only a prompt-prefix
+            # checkpoint, so send just the tool-result suffix and require cache
+            # to avoid duplicating the same top-level turn.
             next_payload["messages"] = copy.deepcopy(tool_messages)
             next_payload["conversation_require_cache"] = True
         else:

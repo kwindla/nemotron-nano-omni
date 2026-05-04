@@ -58,8 +58,10 @@ pgrep -af 'vllm|cicc|ptxas|cc1plus|flashinfer'
 
 Current defaults in `platforms/dgx_spark/config/env.sh`:
 
-- prefix caching enabled
+- vLLM native prefix caching disabled; the custom conversation cache must remain
+  independent of vLLM's block-prefix cache
 - `--mamba-cache-mode align`
+- Mamba cache dtype left at vLLM `auto`
 - Triton MoE backend
 - Triton attention backend
 - multimodal profiling disabled
@@ -146,6 +148,7 @@ Prefix cache smoke:
 
 ```bash
 platforms/dgx_spark/scripts/run_prefix_cache_smoke.sh \
+  --reuse-server \
   --log "$NEMOTRON_VLLM_LOG" \
   --results-json logs/dgx-spark-prefix-cache-results.json
 ```

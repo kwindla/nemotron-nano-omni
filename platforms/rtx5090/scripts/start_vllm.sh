@@ -72,6 +72,12 @@ run_server() {
   if [[ -n "${NEMOTRON_VLLM_MAMBA_CACHE_MODE}" ]]; then
     extra_args+=(--mamba-cache-mode "${NEMOTRON_VLLM_MAMBA_CACHE_MODE}")
   fi
+  if [[ -n "${NEMOTRON_VLLM_MAMBA_CACHE_DTYPE}" && "${NEMOTRON_VLLM_MAMBA_CACHE_DTYPE}" != "auto" ]]; then
+    extra_args+=(--mamba-cache-dtype "${NEMOTRON_VLLM_MAMBA_CACHE_DTYPE}")
+  fi
+  if [[ -n "${NEMOTRON_VLLM_MAMBA_SSM_CACHE_DTYPE}" && "${NEMOTRON_VLLM_MAMBA_SSM_CACHE_DTYPE}" != "auto" ]]; then
+    extra_args+=(--mamba-ssm-cache-dtype "${NEMOTRON_VLLM_MAMBA_SSM_CACHE_DTYPE}")
+  fi
   if [[ -n "${NEMOTRON_VLLM_MAMBA_BACKEND}" ]]; then
     extra_args+=(--mamba-backend "${NEMOTRON_VLLM_MAMBA_BACKEND}")
   fi
@@ -83,6 +89,7 @@ run_server() {
   export VLLM_CONVERSATION_CACHE_MAX_TOKENS
   export VLLM_CONVERSATION_CACHE_MIN_FREE_BLOCKS
   export VLLM_CONVERSATION_CACHE_TARGET_FREE_BLOCKS
+  export VLLM_CONVERSATION_CACHE_FILTER_PREFIX_MM_INPUTS
 
   exec "${NEMOTRON_VLLM_BIN}" serve "${NEMOTRON_MODEL_PATH}" \
     --served-model-name "${NEMOTRON_VLLM_MODEL}" \
