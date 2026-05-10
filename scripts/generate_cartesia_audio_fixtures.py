@@ -20,6 +20,8 @@ class FixtureSpec:
     filename: str
     transcript: str
     speed: float | None = None
+    volume: float | None = None
+    emotion: str | None = None
     max_internal_silence_ms: int | None = None
 
 
@@ -90,6 +92,8 @@ def _synthesize_pcm(
     sample_rate: int,
     cartesia_version: str,
     speed: float | None,
+    volume: float | None = None,
+    emotion: str | None = None,
 ) -> bytes:
     payload = {
         "model_id": model,
@@ -102,8 +106,15 @@ def _synthesize_pcm(
         },
         "language": "en",
     }
+    generation_config = {}
     if speed is not None:
-        payload["speed"] = speed
+        generation_config["speed"] = speed
+    if volume is not None:
+        generation_config["volume"] = volume
+    if emotion is not None:
+        generation_config["emotion"] = emotion
+    if generation_config:
+        payload["generation_config"] = generation_config
     body = json.dumps(payload).encode("utf-8")
     request = urllib.request.Request(
         "https://api.cartesia.ai/tts/bytes",
@@ -175,6 +186,10 @@ def _write_manifest(path: Path, fixtures: list[FixtureSpec]) -> None:
         item = {"file": fixture.filename, "transcript": fixture.transcript}
         if fixture.speed is not None:
             item["speed"] = fixture.speed
+        if fixture.volume is not None:
+            item["volume"] = fixture.volume
+        if fixture.emotion is not None:
+            item["emotion"] = fixture.emotion
         if fixture.max_internal_silence_ms is not None:
             item["max_internal_silence_ms"] = fixture.max_internal_silence_ms
         manifest.append(item)
@@ -232,6 +247,8 @@ def main() -> int:
             sample_rate=args.sample_rate,
             cartesia_version=args.cartesia_version,
             speed=fixture.speed,
+            volume=fixture.volume,
+            emotion=fixture.emotion,
         )
         if fixture.max_internal_silence_ms is not None:
             pcm = _cap_internal_silence(
