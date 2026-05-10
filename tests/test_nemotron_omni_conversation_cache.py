@@ -23,11 +23,13 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         self,
         *,
         conversation_id: str | None = "conversation-test",
+        strip_historical_audio_from_payload: bool = False,
     ) -> NemotronOmniAudioLLMService:
         service = NemotronOmniAudioLLMService(
             conversation_id=conversation_id,
             enable_bash_tool=True,
         )
+        service._strip_historical_audio_from_payload = strip_historical_audio_from_payload
 
         async def noop(*args, **kwargs):
             return None
@@ -156,6 +158,180 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(service._canonical_messages[1]["content"], "Hello")
         self.assertEqual(service._canonical_messages[2]["content"], "world")
+
+    def test_canonical_messages_from_context_keeps_conversation_id_for_append_only(self) -> None:
+        service = self._make_service()
+        prior_context_messages = service._with_system_message(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "world"},
+            ]
+        )
+        service._canonical_messages = copy.deepcopy(prior_context_messages)
+        service._context_lineage_messages = copy.deepcopy(prior_context_messages)
+        service._conversation_cache_committed = True
+        original_conversation_id = service._conversation_id
+
+        canonical_messages = service._canonical_messages_from_context(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "world"},
+                {"role": "user", "content": "Next question"},
+            ]
+        )
+
+        self.assertIsNotNone(canonical_messages)
+        self.assertEqual(service._conversation_id, original_conversation_id)
+        self.assertTrue(service._conversation_cache_committed)
+        self.assertEqual(
+            canonical_messages,
+            service._with_system_message(
+                [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "world"},
+                    {"role": "user", "content": "Next question"},
+                ]
+            ),
+        )
+
+    def test_strip_historical_audio_from_messages_preserves_latest_user_audio(self) -> None:
+        service = self._make_service(strip_historical_audio_from_payload=True)
+        messages = service._with_system_message(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "User audio follows."},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAA="}},
+                    ],
+                },
+                {"role": "assistant", "content": "A unicorn."},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "New user audio follows."},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,BBB="}},
+                    ],
+                },
+            ]
+        )
+
+        stripped = service._strip_historical_audio_from_messages(messages)
+
+        self.assertEqual(
+            stripped[1]["content"],
+            [{"type": "text", "text": "User audio follows."}],
+        )
+        self.assertEqual(
+            stripped[-1]["content"],
+            [
+                {"type": "text", "text": "New user audio follows."},
+                {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,BBB="}},
+            ],
+        )
+
+    def test_canonical_messages_from_context_rotates_conversation_id_on_non_append_change(self) -> None:
+        service = self._make_service()
+        prior_context_messages = service._with_system_message(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "world"},
+            ]
+        )
+        service._canonical_messages = copy.deepcopy(prior_context_messages)
+        service._context_lineage_messages = copy.deepcopy(prior_context_messages)
+        service._conversation_cache_committed = True
+        original_conversation_id = service._conversation_id
+
+        canonical_messages = service._canonical_messages_from_context(
+            [
+                {"role": "user", "content": "Hello"},
+                {"role": "assistant", "content": "WORLD"},
+                {"role": "user", "content": "Next question"},
+            ]
+        )
+
+        self.assertIsNotNone(canonical_messages)
+        self.assertNotEqual(service._conversation_id, original_conversation_id)
+        self.assertFalse(service._conversation_cache_committed)
+        self.assertEqual(service._canonical_messages, [])
+        self.assertEqual(service._context_lineage_messages, [])
+        self.assertEqual(
+            canonical_messages,
+            service._with_system_message(
+                [
+                    {"role": "user", "content": "Hello"},
+                    {"role": "assistant", "content": "WORLD"},
+                    {"role": "user", "content": "Next question"},
+                ]
+            ),
+        )
+
+    def test_context_lineage_ignores_internal_assistant_history_gaps(self) -> None:
+        service = self._make_service()
+        service._canonical_messages = service._with_system_message(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this audio"},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAA="}},
+                    ],
+                },
+                {"role": "assistant", "content": "A unicorn."},
+            ]
+        )
+        service._context_lineage_messages = service._with_system_message(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this audio"},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAA="}},
+                    ],
+                }
+            ]
+        )
+        service._conversation_cache_committed = True
+        original_conversation_id = service._conversation_id
+
+        canonical_messages = service._canonical_messages_from_context(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Describe this audio"},
+                        {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAA="}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": "What creature did I mention? One word only.",
+                },
+            ]
+        )
+
+        self.assertIsNotNone(canonical_messages)
+        self.assertEqual(service._conversation_id, original_conversation_id)
+        self.assertTrue(service._conversation_cache_committed)
+        self.assertEqual(
+            canonical_messages,
+            service._with_system_message(
+                [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe this audio"},
+                            {"type": "audio_url", "audio_url": {"url": "data:audio/wav;base64,AAA="}},
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": "What creature did I mention? One word only.",
+                    },
+                ]
+            ),
+        )
 
     async def test_execute_tool_calls_includes_tool_name(self) -> None:
         service = self._make_service()

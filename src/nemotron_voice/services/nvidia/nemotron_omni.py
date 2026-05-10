@@ -20,6 +20,7 @@ import os
 import re
 import shlex
 import time
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -248,13 +249,18 @@ class NemotronOmniAudioLLMService(LLMService):
         self._bash_tool_max_output_chars = bash_tool_max_output_chars
         self._bash_tool_max_rounds = bash_tool_max_rounds
         self._bash_tool_event_sender = bash_tool_event_sender
+        self._strip_historical_audio_from_payload = (
+            os.getenv("NEMOTRON_OMNI_STRIP_HISTORICAL_AUDIO_FROM_PAYLOAD", "0") != "0"
+        )
 
         self._session: aiohttp.ClientSession | None = None
         self._generation_task: asyncio.Task | None = None
         self._conversation_cache_committed = False
         self._canonical_messages: list[dict[str, Any]] = []
+        self._context_lineage_messages: list[dict[str, Any]] = []
         trace_dir = os.getenv("NEMOTRON_OMNI_TRACE_DIR")
         self._trace_dir = Path(trace_dir) if trace_dir else None
+        self._trace_redact_audio = os.getenv("NEMOTRON_OMNI_TRACE_REDACT_AUDIO", "1") != "0"
         self._top_level_request_seq = 0
 
     def can_generate_metrics(self) -> bool:
@@ -320,6 +326,7 @@ class NemotronOmniAudioLLMService(LLMService):
         if canonical_messages is None:
             logger.debug(f"{self}: ignoring LLM context without a latest user message")
             return
+        self._context_lineage_messages = copy.deepcopy(canonical_messages)
 
         await self._cancel_generation_task()
         payload, full_messages = self._build_payload_from_messages(canonical_messages)
@@ -351,6 +358,8 @@ class NemotronOmniAudioLLMService(LLMService):
         messages: list[dict[str, Any]],
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         full_messages = copy.deepcopy(messages)
+        if self._strip_historical_audio_from_payload:
+            full_messages = self._strip_historical_audio_from_messages(full_messages)
         payload_messages, requires_cache = self._conversation_payload_messages(full_messages)
         payload: dict[str, Any] = {
             "model": self._settings.model,
@@ -388,6 +397,46 @@ class NemotronOmniAudioLLMService(LLMService):
             payload["conversation_id"] = self._conversation_id
 
         return payload, full_messages
+
+    def _strip_historical_audio_from_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        latest_user_index = -1
+        for index in range(len(messages) - 1, -1, -1):
+            if messages[index].get("role") == "user":
+                latest_user_index = index
+                break
+        if latest_user_index < 0:
+            return copy.deepcopy(messages)
+
+        stripped_messages = copy.deepcopy(messages)
+        stripped_audio_parts = 0
+        for index, message in enumerate(stripped_messages):
+            if index == latest_user_index or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if not isinstance(content, list):
+                continue
+            filtered_content = []
+            for item in content:
+                if not isinstance(item, dict):
+                    filtered_content.append(item)
+                    continue
+                item_type = item.get("type")
+                if item_type in {"audio_url", "input_audio"}:
+                    stripped_audio_parts += 1
+                    continue
+                filtered_content.append(item)
+            if filtered_content:
+                message["content"] = filtered_content
+
+        if stripped_audio_parts:
+            logger.debug(
+                f"{self}: stripped {stripped_audio_parts} historical audio part(s) "
+                "from payload messages"
+            )
+        return stripped_messages
 
     def _conversation_payload_messages(
         self,
@@ -524,20 +573,58 @@ class NemotronOmniAudioLLMService(LLMService):
         self,
         context_messages: list[Any],
     ) -> list[dict[str, Any]] | None:
-        latest_user_message: dict[str, Any] | None = None
+        converted_messages: list[dict[str, Any]] = []
         for message in context_messages:
             converted = self._convert_context_message(message)
-            if converted is None or converted.get("role") != "user":
-                continue
-            latest_user_message = converted
+            if converted is not None:
+                converted_messages.append(converted)
 
-        if latest_user_message is None:
+        canonical_messages = self._with_system_message(converted_messages)
+        if (
+            not canonical_messages
+            or canonical_messages[-1].get("role") != "user"
+            or self._latest_user_message(canonical_messages) is None
+        ):
             return None
 
-        canonical_messages = self._with_system_message(self._canonical_messages)
-        if not canonical_messages or canonical_messages[-1] != latest_user_message:
-            canonical_messages.append(latest_user_message)
+        if not self._context_messages_extend_observed_lineage(canonical_messages):
+            self._rotate_conversation_cache_lineage(canonical_messages)
         return canonical_messages
+
+    def _context_messages_extend_observed_lineage(
+        self,
+        observed_messages: list[dict[str, Any]],
+    ) -> bool:
+        lineage_count = len(self._context_lineage_messages)
+        if lineage_count == 0:
+            return True
+        if len(observed_messages) < lineage_count:
+            return False
+        return observed_messages[:lineage_count] == self._context_lineage_messages
+
+    def _rotate_conversation_cache_lineage(
+        self,
+        observed_messages: list[dict[str, Any]],
+    ) -> None:
+        old_conversation_id = self._conversation_id
+        if self._conversation_id:
+            self._conversation_id = f"pipecat-{uuid.uuid4().hex}"
+            logger.info(
+                f"{self}: rotating conversation_id from {old_conversation_id} "
+                f"to {self._conversation_id} after non-append context change"
+            )
+        else:
+            logger.info(
+                f"{self}: resetting uncached conversation lineage after "
+                "non-append context change"
+            )
+        logger.debug(
+            f"{self}: committed roles={self._message_role_summary(self._context_lineage_messages)} "
+            f"observed roles={self._message_role_summary(observed_messages)}"
+        )
+        self._conversation_cache_committed = False
+        self._canonical_messages = []
+        self._context_lineage_messages = []
 
     def _commit_canonical_messages(
         self,
@@ -577,6 +664,8 @@ class NemotronOmniAudioLLMService(LLMService):
     def _trace_json_value(self, value: Any) -> Any:
         if isinstance(value, dict):
             if (
+                self._trace_redact_audio
+                and
                 set(value.keys()) == {"url"}
                 and isinstance(value["url"], str)
                 and value["url"].startswith("data:audio/")

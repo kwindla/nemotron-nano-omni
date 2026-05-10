@@ -147,6 +147,13 @@ def _env_int(name: str, default: int) -> int:
     return int(value)
 
 
+def _env_bool(name: str, default: bool) -> bool:
+    value = os.getenv(name)
+    if value is None or value.strip() == "":
+        return default
+    return value not in {"0", "false", "False", "no", "NO"}
+
+
 def _build_nemotron_speech_stt(*, audio_passthrough: bool = False) -> NemotronSpeechWebSocketSTTService:
     url = os.getenv("NEMOTRON_SPEECH_STT_URL", "ws://127.0.0.1:8080")
     logger.info(f"Using local Nemotron Speech WebSocket STT at {url}")
@@ -290,7 +297,7 @@ class UserAudioContextCollector(FrameProcessor):
         user_aggregator: LLMUserAggregator,
         audio_context_text: str,
         push_context_on_finish: bool = True,
-        pre_speech_buffer_secs: float = 0.2,
+        pre_speech_buffer_secs: float = 0.5,
     ):
         super().__init__()
         self._context = context
@@ -412,7 +419,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             top_p=_env_optional_float("NEMOTRON_OMNI_TOP_P"),
             top_k=_env_int("NEMOTRON_OMNI_TOP_K", NEMOTRON_OMNI_INSTRUCT_DEFAULT_TOP_K),
             audio_prompt=os.getenv("NEMOTRON_OMNI_AUDIO_PROMPT", DEFAULT_AUDIO_PROMPT),
-            chat_template_kwargs={"enable_thinking": False},
+            chat_template_kwargs={
+                "enable_thinking": _env_bool("NEMOTRON_OMNI_ENABLE_THINKING", False)
+            },
         ),
     )
 
@@ -438,6 +447,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             "User audio follows. Listen to it and respond to the user's latest request.",
         ),
         push_context_on_finish=True,
+        pre_speech_buffer_secs=_env_float(
+            "NEMOTRON_OMNI_PRE_SPEECH_BUFFER_SECS",
+            0.5,
+        ),
     )
     pipeline = Pipeline(
         [
