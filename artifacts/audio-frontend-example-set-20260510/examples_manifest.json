@@ -1,0 +1,44 @@
+[
+  {
+    "sample_id": "022-p01-scared-speed_0p90",
+    "case_id": "096-mountain",
+    "family_id": "tool_top_level_file_count",
+    "expected_pattern": "bridge"
+  },
+  {
+    "sample_id": "138-p06-excited-speed_1p10",
+    "case_id": "096-mountain",
+    "family_id": "tool_top_level_file_count",
+    "expected_pattern": "rescue"
+  },
+  {
+    "sample_id": "168-p07-sad-speed_1p10",
+    "case_id": "096-mountain",
+    "family_id": "tool_top_level_file_count",
+    "expected_pattern": "rescue"
+  },
+  {
+    "sample_id": "217-p09-sad-speed_0p90",
+    "case_id": "096-mountain",
+    "family_id": "tool_top_level_file_count",
+    "expected_pattern": "rescue"
+  },
+  {
+    "sample_id": "231-p10-content-baseline",
+    "case_id": "096-mountain",
+    "family_id": "tool_top_level_file_count",
+    "expected_pattern": "rescue"
+  },
+  {
+    "sample_id": "486-p20-excited-baseline",
+    "case_id": "096-mountain",
+    "family_id": "tool_top_level_file_count",
+    "expected_pattern": "bridge"
+  },
+  {
+    "sample_id": "478-p20-neutral-speed_1p10",
+    "case_id": "096-mountain",
+    "family_id": "tool_top_level_file_count",
+    "expected_pattern": "rescue"
+  }
+]

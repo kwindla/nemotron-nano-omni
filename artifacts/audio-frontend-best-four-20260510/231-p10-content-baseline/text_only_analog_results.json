@@ -1,0 +1,254 @@
+{
+  "source48_original": {
+    "assistant_text": "\nMountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and influencing weather patterns.",
+    "trials": [
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9ebb0ba18391d710",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b4c1993eab321732",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-ae61ee7329064f31",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8b117e0413ea792a",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bffa0596c79a42f7",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      }
+    ],
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "majority_count": 5,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true
+  },
+  "pipecat_smallwebrtc": {
+    "assistant_text": "\nMountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and offering breathtaking vistas.",
+    "trials": [
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a805c77eaf6256c2",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1020
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bf0f991dd184533f",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1020
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b8883db91b74a1de",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1020
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b283cd9c0c71f648",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1020
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b5126c4c74270fed",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1020
+      }
+    ],
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "majority_count": 5,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true
+  },
+  "vllm_pyav_float": {
+    "assistant_text": "\nMountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and influencing weather patterns.",
+    "trials": [
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-88d732afbad6ccfb",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a8f50d2aa09f868b",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b4d169e9d04010a1",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bca3d8c890c1df97",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9796b5ef5e6db5d8",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1018
+      }
+    ],
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "majority_count": 5,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true
+  }
+}

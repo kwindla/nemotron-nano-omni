@@ -1,0 +1,254 @@
+{
+  "source48_original": {
+    "assistant_text": "\nMount Everest, the world's highest peak, rises majestically above the Himalayas.",
+    "trials": [
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b0857dacf9bc1af3",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a60541c6db5f8eb9",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a7e5097c1df7d6bc",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a71e7abb0fd8b3d2",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-abea942304cae762",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      }
+    ],
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "majority_count": 5,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true
+  },
+  "pipecat_smallwebrtc": {
+    "assistant_text": "\nMountains are towering landforms that rise dramatically above the surrounding terrain.",
+    "trials": [
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-829022e50d7dd1b6",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1009
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a28eb8a268bfd84e",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1009
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-965289e2c29a5c9c",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1009
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8e376d30a094385d",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1009
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8d9d67cb5f3f5de8",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1009
+      }
+    ],
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "majority_count": 5,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true
+  },
+  "vllm_pyav_float": {
+    "assistant_text": "\nMount Everest, the world's highest peak, rises majestically above the Himalayas.",
+    "trials": [
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-bd4c0bf474253fa7",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a04630a3cc51141d",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-916e1b669ba67b64",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-ba2af9aaa71b846a",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      },
+      {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-871770106a27d711",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1013
+      }
+    ],
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "majority_count": 5,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true
+  }
+}

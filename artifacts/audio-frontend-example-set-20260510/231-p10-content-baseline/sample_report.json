@@ -1,0 +1,75 @@
+{
+  "sample": {
+    "sample_id": "231-p10-content-baseline",
+    "transcript": "In a single sentence, tell me about a mountain.",
+    "emotion": "content",
+    "profile_id": "baseline",
+    "speed": null,
+    "volume": null
+  },
+  "variants": {
+    "source48_original": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/231-p10-content-baseline/source48_original.wav",
+      "first_turn": {
+        "behavior": "text:Mountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and influencing weather patterns.",
+        "content": "\nMountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and influencing weather patterns.",
+        "tool_calls": [],
+        "prompt_tokens": 497
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1081,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    },
+    "pipecat_smallwebrtc": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/231-p10-content-baseline/source48_original.pipecat-smallwebrtc.wav",
+      "first_turn": {
+        "behavior": "text:Mountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and offering breathtaking vistas.",
+        "content": "\nMountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and offering breathtaking vistas.",
+        "tool_calls": [],
+        "prompt_tokens": 497
+      },
+      "second_turn": {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-95d3616764774002",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1083,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": true
+      }
+    },
+    "vllm_pyav_float": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/231-p10-content-baseline/source48_original.vllm-pyav-float.wav",
+      "first_turn": {
+        "behavior": "text:Mountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and influencing weather patterns.",
+        "content": "\nMountains are towering landforms that rise dramatically above the surrounding terrain, often capped with snow and influencing weather patterns.",
+        "tool_calls": [],
+        "prompt_tokens": 497
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1081,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    }
+  },
+  "first_turn_diff": true,
+  "second_turn_diff": true,
+  "bridge_hit": false
+}

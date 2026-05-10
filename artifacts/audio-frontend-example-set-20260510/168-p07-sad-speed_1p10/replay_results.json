@@ -1,0 +1,317 @@
+{
+  "source48_original": {
+    "variant_id": "source48_original",
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-example-set-20260510/168-p07-sad-speed_1p10/source48_original.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape."
+      ],
+      "majority_behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "text:",
+        "text:",
+        "text:",
+        "text:",
+        "text:"
+      ],
+      "majority_behavior": "text:",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": false
+    }
+  },
+  "pipecat_smallwebrtc": {
+    "variant_id": "pipecat_smallwebrtc",
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-example-set-20260510/168-p07-sad-speed_1p10/source48_original.pipecat-smallwebrtc.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nThe mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-bfe754628d26ed8e",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1067
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nThe mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b4de0256faf4ed2c",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1067
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nThe mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8cc18de28c1863e0",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1067
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nThe mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b397df2207b1a578",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1067
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nThe mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a71b1f5c1db62084",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1067
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:The mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+        "text:The mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+        "text:The mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+        "text:The mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+        "text:The mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope."
+      ],
+      "majority_behavior": "text:The mountain rises majestically, its snow\u2011capped peak piercing the sky above a rugged, forested slope.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+      ],
+      "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": true
+    }
+  },
+  "vllm_pyav_float": {
+    "variant_id": "vllm_pyav_float",
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-example-set-20260510/168-p07-sad-speed_1p10/source48_original.vllm-pyav-float.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+          "prompt_tokens": 483
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1061
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape."
+      ],
+      "majority_behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding landscape.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "text:",
+        "text:",
+        "text:",
+        "text:",
+        "text:"
+      ],
+      "majority_behavior": "text:",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": false
+    }
+  }
+}

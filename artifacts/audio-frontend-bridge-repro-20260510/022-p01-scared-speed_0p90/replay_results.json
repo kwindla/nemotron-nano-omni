@@ -1,0 +1,32 @@
+{
+  "source48_original": {
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-bridge-repro-20260510/022-p01-scared-speed_0p90/source48_original.wav",
+    "first_turn_majority_content": "Mount Everest, the world's highest peak, rises majestically above the Himalayas.",
+    "first_turn_prompt_tokens": 480,
+    "second_turn_majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "second_turn_prompt_tokens": 1059,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true,
+    "trials": 5
+  },
+  "pipecat_smallwebrtc": {
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-bridge-repro-20260510/022-p01-scared-speed_0p90/source48_original.pipecat-smallwebrtc.wav",
+    "first_turn_majority_content": "Mountains are towering landforms that rise dramatically above the surrounding terrain.",
+    "first_turn_prompt_tokens": 480,
+    "second_turn_majority_behavior": "text:",
+    "second_turn_prompt_tokens": 1055,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": false,
+    "trials": 5
+  },
+  "vllm_pyav_float": {
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-bridge-repro-20260510/022-p01-scared-speed_0p90/source48_original.vllm-pyav-float.wav",
+    "first_turn_majority_content": "Mount Everest, the world's highest peak, rises majestically above the Himalayas.",
+    "first_turn_prompt_tokens": 480,
+    "second_turn_majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "second_turn_prompt_tokens": 1059,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true,
+    "trials": 5
+  }
+}

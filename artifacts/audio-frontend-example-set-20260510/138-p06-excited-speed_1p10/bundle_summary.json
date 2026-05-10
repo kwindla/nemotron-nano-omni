@@ -1,0 +1,26 @@
+{
+  "sample": {
+    "sample_id": "138-p06-excited-speed_1p10",
+    "transcript": "Explain a mountain in one sentence.",
+    "emotion": "excited",
+    "profile_id": "speed_1p10",
+    "speed": 1.1,
+    "volume": null
+  },
+  "case": {
+    "case_id": "096-mountain",
+    "audio_prompt": "Tell me in one sentence about a mountain."
+  },
+  "family": {
+    "family_id": "tool_top_level_file_count",
+    "prompt": "You must use the bash tool now. Run exactly this command: find . -maxdepth 1 -type f | wc -l. Do not answer from memory or prior knowledge. Reply with only the tool stdout."
+  },
+  "expected_pattern": "rescue",
+  "observed_pattern": {
+    "source48": false,
+    "pipecat": true,
+    "vllm": false
+  },
+  "sanity_check_passed": true,
+  "text_only_all_match_expected": true
+}

@@ -1,0 +1,76 @@
+{
+  "sample": {
+    "sample_id": "478-p20-neutral-speed_1p10",
+    "transcript": "Offer a one-sentence description of a mountain.",
+    "emotion": "neutral",
+    "profile_id": "speed_1p10",
+    "speed": 1.1,
+    "volume": null
+  },
+  "variants": {
+    "source48_original": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/478-p20-neutral-speed_1p10/source48_original.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a towering, rugged landform that rises sharply above the surrounding landscape.",
+        "content": "\nA mountain is a towering, rugged landform that rises sharply above the surrounding landscape.",
+        "tool_calls": [],
+        "prompt_tokens": 483
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1061,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    },
+    "pipecat_smallwebrtc": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/478-p20-neutral-speed_1p10/source48_original.pipecat-smallwebrtc.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "tool_calls": [],
+        "prompt_tokens": 483
+      },
+      "second_turn": {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-8dc6869845f99a2f",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1061,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": true
+      }
+    },
+    "vllm_pyav_float": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/478-p20-neutral-speed_1p10/source48_original.vllm-pyav-float.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a towering, rugged landform that rises sharply above the surrounding landscape.",
+        "content": "\nA mountain is a towering, rugged landform that rises sharply above the surrounding landscape.",
+        "tool_calls": [],
+        "prompt_tokens": 483
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1061,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    }
+  },
+  "first_turn_diff": true,
+  "second_turn_diff": true,
+  "bridge_hit": false,
+  "reverse_bridge_hit": true
+}

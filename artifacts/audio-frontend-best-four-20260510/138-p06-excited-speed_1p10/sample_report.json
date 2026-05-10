@@ -1,0 +1,75 @@
+{
+  "sample": {
+    "sample_id": "138-p06-excited-speed_1p10",
+    "transcript": "Explain a mountain in one sentence.",
+    "emotion": "excited",
+    "profile_id": "speed_1p10",
+    "speed": 1.1,
+    "volume": null
+  },
+  "variants": {
+    "source48_original": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/138-p06-excited-speed_1p10/source48_original.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a large natural elevation of the Earth's surface that rises prominently above its surroundings.",
+        "content": "\nA mountain is a large natural elevation of the Earth's surface that rises prominently above its surroundings.",
+        "tool_calls": [],
+        "prompt_tokens": 479
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1058,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    },
+    "pipecat_smallwebrtc": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/138-p06-excited-speed_1p10/source48_original.pipecat-smallwebrtc.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a large natural elevation of the Earth's surface that rises prominently above its surroundings.",
+        "content": "\nA mountain is a large natural elevation of the Earth's surface that rises prominently above its surroundings.",
+        "tool_calls": [],
+        "prompt_tokens": 479
+      },
+      "second_turn": {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-a028e3218ac1328d",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1058,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": true
+      }
+    },
+    "vllm_pyav_float": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/138-p06-excited-speed_1p10/source48_original.vllm-pyav-float.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a large natural elevation of the Earth's surface that rises prominently above its surroundings.",
+        "content": "\nA mountain is a large natural elevation of the Earth's surface that rises prominently above its surroundings.",
+        "tool_calls": [],
+        "prompt_tokens": 479
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1058,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    }
+  },
+  "first_turn_diff": false,
+  "second_turn_diff": true,
+  "bridge_hit": false
+}

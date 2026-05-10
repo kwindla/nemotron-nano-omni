@@ -1,0 +1,14 @@
+{
+  "sample_id": "022-p01-scared-speed_0p90",
+  "transcript": "Tell me in one sentence about a mountain.",
+  "emotion": "scared",
+  "speed": 0.9,
+  "case_id": "096-mountain",
+  "family_id": "tool_top_level_file_count",
+  "bridge_hit_confirmed": true,
+  "source48_second_turn": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+  "pipecat_second_turn": "text:",
+  "vllm_second_turn": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+  "text_only_all_match_expected": true,
+  "claim": "The Pipecat SmallWebRTC-style path deterministically fails on turn 2 while the original 48 kHz source and the vLLM whole-buffer PyAV path both succeed, and the failure does not reproduce in a text-only analog built from the observed first-turn assistant texts."
+}

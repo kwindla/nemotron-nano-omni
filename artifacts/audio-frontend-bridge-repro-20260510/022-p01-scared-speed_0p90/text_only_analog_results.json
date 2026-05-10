@@ -1,0 +1,26 @@
+{
+  "source48_original": {
+    "assistant_text": "Mount Everest, the world's highest peak, rises majestically above the Himalayas.",
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "prompt_tokens": 1013,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true,
+    "trials": 5
+  },
+  "pipecat_smallwebrtc": {
+    "assistant_text": "Mountains are towering landforms that rise dramatically above the surrounding terrain.",
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "prompt_tokens": 1009,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true,
+    "trials": 5
+  },
+  "vllm_pyav_float": {
+    "assistant_text": "Mount Everest, the world's highest peak, rises majestically above the Himalayas.",
+    "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "prompt_tokens": 1013,
+    "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+    "matches_expected_all_trials": true,
+    "trials": 5
+  }
+}

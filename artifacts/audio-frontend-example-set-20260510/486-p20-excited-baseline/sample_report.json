@@ -1,0 +1,85 @@
+{
+  "sample": {
+    "sample_id": "486-p20-excited-baseline",
+    "transcript": "Offer a one-sentence description of a mountain.",
+    "emotion": "excited",
+    "profile_id": "baseline",
+    "speed": null,
+    "volume": null
+  },
+  "variants": {
+    "source48_original": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/486-p20-excited-baseline/source48_original.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "tool_calls": [],
+        "prompt_tokens": 486
+      },
+      "second_turn": {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b4722743f5faa70d",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1064,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": true
+      }
+    },
+    "pipecat_smallwebrtc": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/486-p20-excited-baseline/source48_original.pipecat-smallwebrtc.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "tool_calls": [],
+        "prompt_tokens": 486
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1064,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    },
+    "vllm_pyav_float": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/486-p20-excited-baseline/source48_original.vllm-pyav-float.wav",
+      "first_turn": {
+        "behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "tool_calls": [],
+        "prompt_tokens": 486
+      },
+      "second_turn": {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-822213c78eea361d",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1064,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": true
+      }
+    }
+  },
+  "first_turn_diff": false,
+  "second_turn_diff": true,
+  "bridge_hit": true,
+  "reverse_bridge_hit": false
+}

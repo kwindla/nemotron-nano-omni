@@ -1,0 +1,41 @@
+{
+  "source": {
+    "path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/168-p07-sad-speed_1p10/source48_original.wav",
+    "sha256_bytes": "285b594d5183bcd284da4056a445c7bee2dfcdf7a3bfd84223f701539b25b0cf",
+    "sample_rate": 48000,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "subtype": "PCM_16",
+    "frames": 93622,
+    "duration_s": 1.9504583333333334
+  },
+  "pipecat_smallwebrtc": {
+    "path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/168-p07-sad-speed_1p10/source48_original.pipecat-smallwebrtc.wav",
+    "sha256_bytes": "3bfb3af1161b33e9a4f79af1da092a051a46c330bfa5418ee1328f2895c02adb",
+    "sample_rate": 16000,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "subtype": "PCM_16",
+    "frames": 31191,
+    "duration_s": 1.9494375,
+    "sha256_f32": "729de6ece3ca495c00b7a78d7ad7e80ffa039d03749327744ad29a40ac6a9b3c",
+    "path_kind": "pipecat_smallwebrtc",
+    "frame_ms": 20
+  },
+  "vllm_pyav_float": {
+    "path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/168-p07-sad-speed_1p10/source48_original.vllm-pyav-float.wav",
+    "sha256_bytes": "001a5bb437b6ff78a6b1d39a0871968df576e8101b1c10400f1e59cf254c84fd",
+    "sample_rate": 16000,
+    "channels": 1,
+    "sample_width_bytes": 4,
+    "subtype": "FLOAT",
+    "frames": 31207,
+    "duration_s": 1.9504375,
+    "sha256_f32": "9ad78739aaae37eca3aa05fb8a0f085acf34dcf9e071ee699667e303a05a4e69",
+    "path_kind": "vllm_pyav_float"
+  },
+  "notes": [
+    "The Pipecat artifact matches SmallWebRTC's frame-by-frame PyAV resample to s16 mono 16 kHz, then serializes the exact int16 bytes to WAV.",
+    "The vLLM artifact matches vLLM's whole-buffer PyAV resample to float32 mono 16 kHz and is written as a float WAV so no extra PCM16 quantization is introduced."
+  ]
+}

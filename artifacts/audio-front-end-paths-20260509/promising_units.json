@@ -1,0 +1,22 @@
+[
+  {
+    "case_id": "069-backpack",
+    "family_id": "tool_pwd",
+    "bucket": "original_repro_anchor"
+  },
+  {
+    "case_id": "022-aardvark",
+    "family_id": "text_vowel_count_plus_constant",
+    "bucket": "downstream_reasoning"
+  },
+  {
+    "case_id": "078-doorknob",
+    "family_id": "text_vowel_count_plus_constant",
+    "bucket": "downstream_reasoning"
+  },
+  {
+    "case_id": "096-mountain",
+    "family_id": "tool_top_level_file_count",
+    "bucket": "downstream_tool_policy"
+  }
+]

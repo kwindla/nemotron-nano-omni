@@ -1,0 +1,84 @@
+{
+  "sample": {
+    "sample_id": "022-p01-scared-speed_0p90",
+    "transcript": "Tell me in one sentence about a mountain.",
+    "emotion": "scared",
+    "profile_id": "speed_0p90",
+    "speed": 0.9,
+    "volume": null
+  },
+  "variants": {
+    "source48_original": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/022-p01-scared-speed_0p90/source48_original.wav",
+      "first_turn": {
+        "behavior": "text:Mount Everest, the world's highest peak, rises majestically above the Himalayas.",
+        "content": "\nMount Everest, the world's highest peak, rises majestically above the Himalayas.",
+        "tool_calls": [],
+        "prompt_tokens": 480
+      },
+      "second_turn": {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-af1f9bde4e65617f",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1059,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": true
+      }
+    },
+    "pipecat_smallwebrtc": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/022-p01-scared-speed_0p90/source48_original.pipecat-smallwebrtc.wav",
+      "first_turn": {
+        "behavior": "text:Mountains are towering landforms that rise dramatically above the surrounding terrain.",
+        "content": "\nMountains are towering landforms that rise dramatically above the surrounding terrain.",
+        "tool_calls": [],
+        "prompt_tokens": 480
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1055,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    },
+    "vllm_pyav_float": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/022-p01-scared-speed_0p90/source48_original.vllm-pyav-float.wav",
+      "first_turn": {
+        "behavior": "text:Mount Everest, the world's highest peak, rises majestically above the Himalayas.",
+        "content": "\nMount Everest, the world's highest peak, rises majestically above the Himalayas.",
+        "tool_calls": [],
+        "prompt_tokens": 480
+      },
+      "second_turn": {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-b9d64c48af20a848",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1059,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": true
+      }
+    }
+  },
+  "first_turn_diff": true,
+  "second_turn_diff": true,
+  "bridge_hit": true
+}

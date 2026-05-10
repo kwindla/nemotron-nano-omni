@@ -1,0 +1,362 @@
+{
+  "source48_original": {
+    "variant_id": "source48_original",
+    "sample_path": "artifacts/audio-frontend-new-hits-20260510/486-p20-excited-baseline/source48_original.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-ab9d40037850176f",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-ab1dc67cfa19468d",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9b4ab8b0affbb9fb",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a08ed25af6e53e5c",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a985961b58160f65",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain."
+      ],
+      "majority_behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+      ],
+      "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": true
+    }
+  },
+  "pipecat_smallwebrtc": {
+    "variant_id": "pipecat_smallwebrtc",
+    "sample_path": "artifacts/audio-frontend-new-hits-20260510/486-p20-excited-baseline/source48_original.pipecat-smallwebrtc.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1064
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain."
+      ],
+      "majority_behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "text:",
+        "text:",
+        "text:",
+        "text:",
+        "text:"
+      ],
+      "majority_behavior": "text:",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": false
+    }
+  },
+  "vllm_pyav_float": {
+    "variant_id": "vllm_pyav_float",
+    "sample_path": "artifacts/audio-frontend-new-hits-20260510/486-p20-excited-baseline/source48_original.vllm-pyav-float.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-bbcd2011f6ed6f91",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-97ed75a398bda47b",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a3ce311c648ec613",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-9da120404d401605",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+          "prompt_tokens": 486
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-8cebbd7b87e85f65",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1064
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+        "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain."
+      ],
+      "majority_behavior": "text:A mountain is a towering, rugged landform that rises dramatically above the surrounding terrain.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+      ],
+      "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": true
+    }
+  }
+}

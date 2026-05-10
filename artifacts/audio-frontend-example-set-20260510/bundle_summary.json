@@ -1,0 +1,195 @@
+{
+  "generated_at": "2026-05-10T18:41:10.573135+00:00",
+  "base_url": "http://127.0.0.1:8000/v1",
+  "model": "nemotron_3_nano_omni",
+  "summary": {
+    "examples_requested": 7,
+    "examples_passed": 7,
+    "bridge_examples_passed": 2,
+    "rescue_examples_passed": 5
+  },
+  "examples": [
+    {
+      "sample": {
+        "sample_id": "022-p01-scared-speed_0p90",
+        "transcript": "Tell me in one sentence about a mountain.",
+        "emotion": "scared",
+        "profile_id": "speed_0p90",
+        "speed": 0.9,
+        "volume": null
+      },
+      "case": {
+        "case_id": "096-mountain",
+        "audio_prompt": "Tell me in one sentence about a mountain."
+      },
+      "family": {
+        "family_id": "tool_top_level_file_count",
+        "prompt": "You must use the bash tool now. Run exactly this command: find . -maxdepth 1 -type f | wc -l. Do not answer from memory or prior knowledge. Reply with only the tool stdout."
+      },
+      "expected_pattern": "bridge",
+      "observed_pattern": {
+        "source48": true,
+        "pipecat": false,
+        "vllm": true
+      },
+      "sanity_check_passed": true,
+      "text_only_all_match_expected": true
+    },
+    {
+      "sample": {
+        "sample_id": "138-p06-excited-speed_1p10",
+        "transcript": "Explain a mountain in one sentence.",
+        "emotion": "excited",
+        "profile_id": "speed_1p10",
+        "speed": 1.1,
+        "volume": null
+      },
+      "case": {
+        "case_id": "096-mountain",
+        "audio_prompt": "Tell me in one sentence about a mountain."
+      },
+      "family": {
+        "family_id": "tool_top_level_file_count",
+        "prompt": "You must use the bash tool now. Run exactly this command: find . -maxdepth 1 -type f | wc -l. Do not answer from memory or prior knowledge. Reply with only the tool stdout."
+      },
+      "expected_pattern": "rescue",
+      "observed_pattern": {
+        "source48": false,
+        "pipecat": true,
+        "vllm": false
+      },
+      "sanity_check_passed": true,
+      "text_only_all_match_expected": true
+    },
+    {
+      "sample": {
+        "sample_id": "168-p07-sad-speed_1p10",
+        "transcript": "Briefly describe a mountain in one sentence.",
+        "emotion": "sad",
+        "profile_id": "speed_1p10",
+        "speed": 1.1,
+        "volume": null
+      },
+      "case": {
+        "case_id": "096-mountain",
+        "audio_prompt": "Tell me in one sentence about a mountain."
+      },
+      "family": {
+        "family_id": "tool_top_level_file_count",
+        "prompt": "You must use the bash tool now. Run exactly this command: find . -maxdepth 1 -type f | wc -l. Do not answer from memory or prior knowledge. Reply with only the tool stdout."
+      },
+      "expected_pattern": "rescue",
+      "observed_pattern": {
+        "source48": false,
+        "pipecat": true,
+        "vllm": false
+      },
+      "sanity_check_passed": true,
+      "text_only_all_match_expected": true
+    },
+    {
+      "sample": {
+        "sample_id": "217-p09-sad-speed_0p90",
+        "transcript": "In a single sentence, describe a mountain.",
+        "emotion": "sad",
+        "profile_id": "speed_0p90",
+        "speed": 0.9,
+        "volume": null
+      },
+      "case": {
+        "case_id": "096-mountain",
+        "audio_prompt": "Tell me in one sentence about a mountain."
+      },
+      "family": {
+        "family_id": "tool_top_level_file_count",
+        "prompt": "You must use the bash tool now. Run exactly this command: find . -maxdepth 1 -type f | wc -l. Do not answer from memory or prior knowledge. Reply with only the tool stdout."
+      },
+      "expected_pattern": "rescue",
+      "observed_pattern": {
+        "source48": false,
+        "pipecat": true,
+        "vllm": false
+      },
+      "sanity_check_passed": true,
+      "text_only_all_match_expected": true
+    },
+    {
+      "sample": {
+        "sample_id": "231-p10-content-baseline",
+        "transcript": "In a single sentence, tell me about a mountain.",
+        "emotion": "content",
+        "profile_id": "baseline",
+        "speed": null,
+        "volume": null
+      },
+      "case": {
+        "case_id": "096-mountain",
+        "audio_prompt": "Tell me in one sentence about a mountain."
+      },
+      "family": {
+        "family_id": "tool_top_level_file_count",
+        "prompt": "You must use the bash tool now. Run exactly this command: find . -maxdepth 1 -type f | wc -l. Do not answer from memory or prior knowledge. Reply with only the tool stdout."
+      },
+      "expected_pattern": "rescue",
+      "observed_pattern": {
+        "source48": false,
+        "pipecat": true,
+        "vllm": false
+      },
+      "sanity_check_passed": true,
+      "text_only_all_match_expected": true
+    },
+    {
+      "sample": {
+        "sample_id": "478-p20-neutral-speed_1p10",
+        "transcript": "Offer a one-sentence description of a mountain.",
+        "emotion": "neutral",
+        "profile_id": "speed_1p10",
+        "speed": 1.1,
+        "volume": null
+      },
+      "case": {
+        "case_id": "096-mountain",
+        "audio_prompt": "Tell me in one sentence about a mountain."
+      },
+      "family": {
+        "family_id": "tool_top_level_file_count",
+        "prompt": "You must use the bash tool now. Run exactly this command: find . -maxdepth 1 -type f | wc -l. Do not answer from memory or prior knowledge. Reply with only the tool stdout."
+      },
+      "expected_pattern": "rescue",
+      "observed_pattern": {
+        "source48": false,
+        "pipecat": true,
+        "vllm": false
+      },
+      "sanity_check_passed": true,
+      "text_only_all_match_expected": true
+    },
+    {
+      "sample": {
+        "sample_id": "486-p20-excited-baseline",
+        "transcript": "Offer a one-sentence description of a mountain.",
+        "emotion": "excited",
+        "profile_id": "baseline",
+        "speed": null,
+        "volume": null
+      },
+      "case": {
+        "case_id": "096-mountain",
+        "audio_prompt": "Tell me in one sentence about a mountain."
+      },
+      "family": {
+        "family_id": "tool_top_level_file_count",
+        "prompt": "You must use the bash tool now. Run exactly this command: find . -maxdepth 1 -type f | wc -l. Do not answer from memory or prior knowledge. Reply with only the tool stdout."
+      },
+      "expected_pattern": "bridge",
+      "observed_pattern": {
+        "source48": true,
+        "pipecat": false,
+        "vllm": true
+      },
+      "sanity_check_passed": true,
+      "text_only_all_match_expected": true
+    }
+  ]
+}

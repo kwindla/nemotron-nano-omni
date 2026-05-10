@@ -1,0 +1,75 @@
+{
+  "sample": {
+    "sample_id": "217-p09-sad-speed_0p90",
+    "transcript": "In a single sentence, describe a mountain.",
+    "emotion": "sad",
+    "profile_id": "speed_0p90",
+    "speed": 0.9,
+    "volume": null
+  },
+  "variants": {
+    "source48_original": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/217-p09-sad-speed_0p90/source48_original.wav",
+      "first_turn": {
+        "behavior": "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "tool_calls": [],
+        "prompt_tokens": 500
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1076,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    },
+    "pipecat_smallwebrtc": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/217-p09-sad-speed_0p90/source48_original.pipecat-smallwebrtc.wav",
+      "first_turn": {
+        "behavior": "text:A towering, snow\u2011capped peak rises above the misty valley.",
+        "content": "\nA towering, snow\u2011capped peak rises above the misty valley.",
+        "tool_calls": [],
+        "prompt_tokens": 500
+      },
+      "second_turn": {
+        "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "content": "",
+        "tool_calls": [
+          {
+            "id": "chatcmpl-tool-9410545016de13e6",
+            "type": "function",
+            "function": {
+              "name": "run_bash",
+              "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+            }
+          }
+        ],
+        "prompt_tokens": 1076,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": true
+      }
+    },
+    "vllm_pyav_float": {
+      "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/mountain-frontend-search-20260509/samples/217-p09-sad-speed_0p90/source48_original.vllm-pyav-float.wav",
+      "first_turn": {
+        "behavior": "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "tool_calls": [],
+        "prompt_tokens": 500
+      },
+      "second_turn": {
+        "behavior": "text:",
+        "content": "",
+        "tool_calls": [],
+        "prompt_tokens": 1076,
+        "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "matches_expected": false
+      }
+    }
+  },
+  "first_turn_diff": true,
+  "second_turn_diff": true,
+  "bridge_hit": false
+}

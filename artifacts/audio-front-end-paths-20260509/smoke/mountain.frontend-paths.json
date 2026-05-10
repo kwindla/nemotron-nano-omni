@@ -1,0 +1,41 @@
+{
+  "source": {
+    "path": "artifacts/audio-waveform-variant-study-20260504/samples/096-mountain__tool_top_level_file_count/source48_original.wav",
+    "sha256_bytes": "9a73bb84129f0f07c0f3605463818c64c21cd1e227921b70880e36bc8cd5b83e",
+    "sample_rate": 48000,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "subtype": "PCM_16",
+    "frames": 91393,
+    "duration_s": 1.9040208333333333
+  },
+  "pipecat_smallwebrtc": {
+    "path": "artifacts/audio-front-end-paths-20260509/smoke/mountain.pipecat-smallwebrtc.wav",
+    "sha256_bytes": "1f407599feb55352a94e00c4a0a51781af4f347aba7ef1201b8855e6a569bdc0",
+    "sample_rate": 16000,
+    "channels": 1,
+    "sample_width_bytes": 2,
+    "subtype": "PCM_16",
+    "frames": 30448,
+    "duration_s": 1.903,
+    "sha256_f32": "5bff7b9fe6f8c3e03c691d97d43d2d4ad67bf7be1f65d45afbd958e11ddac7cc",
+    "path_kind": "pipecat_smallwebrtc",
+    "frame_ms": 20
+  },
+  "vllm_pyav_float": {
+    "path": "artifacts/audio-front-end-paths-20260509/smoke/mountain.vllm-pyav-float.wav",
+    "sha256_bytes": "71129c78994bf30160d753b96793e02499d5b70218f030528cd2739e26580627",
+    "sample_rate": 16000,
+    "channels": 1,
+    "sample_width_bytes": 4,
+    "subtype": "FLOAT",
+    "frames": 30464,
+    "duration_s": 1.904,
+    "sha256_f32": "c7ad3f66286a64f4af1fc3c133b7644dfc91afd43d17b7f595c47ef958642c7d",
+    "path_kind": "vllm_pyav_float"
+  },
+  "notes": [
+    "The Pipecat artifact matches SmallWebRTC's frame-by-frame PyAV resample to s16 mono 16 kHz, then serializes the exact int16 bytes to WAV.",
+    "The vLLM artifact matches vLLM's whole-buffer PyAV resample to float32 mono 16 kHz and is written as a float WAV so no extra PCM16 quantization is introduced."
+  ]
+}

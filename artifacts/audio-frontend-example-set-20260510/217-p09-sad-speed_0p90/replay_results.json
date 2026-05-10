@@ -1,0 +1,317 @@
+{
+  "source48_original": {
+    "variant_id": "source48_original",
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-example-set-20260510/217-p09-sad-speed_0p90/source48_original.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky."
+      ],
+      "majority_behavior": "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "text:",
+        "text:",
+        "text:",
+        "text:",
+        "text:"
+      ],
+      "majority_behavior": "text:",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": false
+    }
+  },
+  "pipecat_smallwebrtc": {
+    "variant_id": "pipecat_smallwebrtc",
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-example-set-20260510/217-p09-sad-speed_0p90/source48_original.pipecat-smallwebrtc.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nA towering, snow\u2011capped peak rises above the misty valley.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-871833677dd3a743",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering, snow\u2011capped peak rises above the misty valley.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-ab09b306021a9a1d",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering, snow\u2011capped peak rises above the misty valley.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-892ca293930e42b8",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering, snow\u2011capped peak rises above the misty valley.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-a6bb5e3a8398662d",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering, snow\u2011capped peak rises above the misty valley.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+          "content": "",
+          "tool_calls": [
+            {
+              "id": "chatcmpl-tool-b29e36f18867d940",
+              "type": "function",
+              "function": {
+                "name": "run_bash",
+                "arguments": "{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+              }
+            }
+          ],
+          "prompt_tokens": 1076
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:A towering, snow\u2011capped peak rises above the misty valley.",
+        "text:A towering, snow\u2011capped peak rises above the misty valley.",
+        "text:A towering, snow\u2011capped peak rises above the misty valley.",
+        "text:A towering, snow\u2011capped peak rises above the misty valley.",
+        "text:A towering, snow\u2011capped peak rises above the misty valley."
+      ],
+      "majority_behavior": "text:A towering, snow\u2011capped peak rises above the misty valley.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+        "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}"
+      ],
+      "majority_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": true
+    }
+  },
+  "vllm_pyav_float": {
+    "variant_id": "vllm_pyav_float",
+    "sample_path": "/home/khkramer/src/nemotron-nano-omni/artifacts/audio-frontend-example-set-20260510/217-p09-sad-speed_0p90/source48_original.vllm-pyav-float.wav",
+    "trials": [
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      },
+      {
+        "first_turn": {
+          "content": "\nA towering mountain rises majestically, its rugged peaks piercing the sky.",
+          "prompt_tokens": 500
+        },
+        "second_turn": {
+          "behavior": "text:",
+          "content": "",
+          "tool_calls": [],
+          "prompt_tokens": 1076
+        }
+      }
+    ],
+    "first_turn": {
+      "behaviors": [
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+        "text:A towering mountain rises majestically, its rugged peaks piercing the sky."
+      ],
+      "majority_behavior": "text:A towering mountain rises majestically, its rugged peaks piercing the sky.",
+      "majority_count": 5
+    },
+    "second_turn": {
+      "behaviors": [
+        "text:",
+        "text:",
+        "text:",
+        "text:",
+        "text:"
+      ],
+      "majority_behavior": "text:",
+      "majority_count": 5,
+      "expected_behavior": "tool:{\"code\": \"find . -maxdepth 1 -type f | wc -l\"}",
+      "matches_expected_all_trials": false
+    }
+  }
+}
