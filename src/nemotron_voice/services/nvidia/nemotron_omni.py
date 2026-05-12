@@ -35,6 +35,11 @@ from pipecat.frames.frames import (
     EndFrame,
     ErrorFrame,
     Frame,
+    FunctionCallCancelFrame,
+    FunctionCallFromLLM,
+    FunctionCallInProgressFrame,
+    FunctionCallResultFrame,
+    FunctionCallsStartedFrame,
     InputAudioRawFrame,
     InterruptionFrame,
     LLMContextFrame,
@@ -50,7 +55,11 @@ from pipecat.processors.aggregators.llm_context import (
     is_given as context_is_given,
 )
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.llm_service import FunctionCallParams, LLMService
+from pipecat.services.llm_service import (
+    FunctionCallParams,
+    FunctionCallRunnerItem,
+    LLMService,
+)
 from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
 
 _TRACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -157,10 +166,6 @@ class ChatCompletionPassResult:
     first_token: bool
 
 
-class ConversationCacheMissError(RuntimeError):
-    pass
-
-
 @dataclass
 class NormalizedRequestSnapshot:
     context: LLMContext
@@ -169,6 +174,23 @@ class NormalizedRequestSnapshot:
     tools: list[dict[str, Any]] | None
     tool_choice: Any | None
     cache_shape_fingerprint: str
+
+
+@dataclass
+class SerialFunctionCallRunnerItem(FunctionCallRunnerItem):
+    batch_id: str = ""
+
+
+@dataclass
+class ToolBatchState:
+    batch_id: str
+    user_turn_key: str | None
+    runner_items: list[SerialFunctionCallRunnerItem]
+    started_ids: set[str] = field(default_factory=set)
+    pending_signature_keys: set[tuple[str, str]] = field(default_factory=set)
+    has_real_execution: bool = False
+    round_counted: bool = False
+    completed: bool = False
 
 
 @dataclass
@@ -206,8 +228,6 @@ class NemotronOmniAudioLLMService(LLMService):
         model: str | None = None,
         settings: Settings | None = None,
         audio_passthrough: bool = False,
-        conversation_id: str | None = None,
-        suffix_only_conversation: bool = True,
         request_timeout_secs: float = 180.0,
         enable_bash_tool: bool = False,
         bash_tool_cwd: str | None = None,
@@ -225,10 +245,6 @@ class NemotronOmniAudioLLMService(LLMService):
             model: Model name exposed by vLLM.
             settings: Runtime-updatable LLM settings.
             audio_passthrough: Whether to pass input audio frames downstream.
-            conversation_id: Optional stable id sent to vLLM for exact
-                conversation-cache reuse across turns.
-            suffix_only_conversation: After the first successful cached turn,
-                send only the latest user message for the conversation id.
             request_timeout_secs: Total HTTP timeout for one streamed request.
             enable_bash_tool: Whether to expose the local ``run_bash`` tool.
             bash_tool_cwd: Working directory for bash tool calls.
@@ -263,14 +279,12 @@ class NemotronOmniAudioLLMService(LLMService):
         if settings is not None:
             default_settings.apply_update(settings)
 
-        super().__init__(settings=default_settings, **kwargs)
+        super().__init__(settings=default_settings, run_in_parallel=False, **kwargs)
 
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
         self._chat_completions_url = f"{self._base_url}/chat/completions"
         self._audio_passthrough = audio_passthrough
-        self._conversation_id = conversation_id
-        self._suffix_only_conversation = suffix_only_conversation
         self._request_timeout_secs = request_timeout_secs
         self._enable_bash_tool = enable_bash_tool
         self._bash_tool_cwd = bash_tool_cwd or os.getcwd()
@@ -284,10 +298,15 @@ class NemotronOmniAudioLLMService(LLMService):
 
         self._session: aiohttp.ClientSession | None = None
         self._generation_task: asyncio.Task | None = None
-        self._conversation_cache_committed = False
-        self._canonical_messages: list[dict[str, Any]] = []
-        self._context_lineage_messages: list[dict[str, Any]] = []
-        self._context_lineage_cache_shape_fingerprint: str | None = None
+        self._current_turn_user_key: str | None = None
+        self._current_turn_round_count = 0
+        self._round_limit_closure_issued = False
+        self._turn_tool_results: dict[tuple[str, str], dict[str, Any]] = {}
+        self._current_batch_id: str | None = None
+        self._running_batch_id: str | None = None
+        self._pending_followup_batch_id: str | None = None
+        self._stale_batch_ids: set[str] = set()
+        self._tool_batch_states: dict[str, ToolBatchState] = {}
         trace_dir = os.getenv("NEMOTRON_OMNI_TRACE_DIR")
         self._trace_dir = Path(trace_dir) if trace_dir else None
         self._trace_redact_audio = os.getenv("NEMOTRON_OMNI_TRACE_REDACT_AUDIO", "1") != "0"
@@ -342,24 +361,49 @@ class NemotronOmniAudioLLMService(LLMService):
         # LLMService.process_frame handles interruptions and settings updates,
         # but it does not forward arbitrary frames for us.
         if isinstance(frame, LLMContextFrame):
-            await self._handle_context_frame(copy.deepcopy(frame.context))
+            latest_user_key = self._latest_user_turn_key_from_context(frame.context)
+            if latest_user_key and latest_user_key != self._current_turn_user_key:
+                superseded_sync_batch = (
+                    self._current_batch_id is not None or self._pending_followup_batch_id is not None
+                )
+                # Order matters. Mark the in-flight batch stale first
+                # (synchronously) so the sequential runner discards its queued
+                # siblings the moment it is unblocked; then cancel the running
+                # tool task; only then pop the batch state, reset per-turn
+                # dedup/round state, and broadcast cancels for the queued ids.
+                # If we popped/reset before cancelling the running tool, a tool
+                # that finished in the await gap could repopulate per-turn
+                # `_turn_tool_results` for the superseding turn and emit a stale
+                # run_llm=True followup that supersedes it.
+                self._mark_current_batch_stale()
+                await self._cancel_generation_task()
+                if superseded_sync_batch:
+                    await self._cancel_running_sync_function_calls()
+                queued_cancellations = self._prepare_batch_supersession()
+                self._reset_turn_tool_state(latest_user_key)
+                if queued_cancellations:
+                    await self._broadcast_queued_function_call_cancellations(queued_cancellations)
+            else:
+                self._maybe_credit_pending_followup_batch(latest_user_key)
+                await self._cancel_generation_task()
+
+            self._generation_task = self.create_task(
+                self._run_context_generation_task(frame.context),
+                name="nemotron_omni_context_completion",
+            )
         elif isinstance(frame, InputAudioRawFrame):
             if self._audio_passthrough:
                 await self.push_frame(frame, direction)
         elif isinstance(frame, InterruptionFrame):
+            queued_cancellations = self._prepare_batch_supersession()
             await self._cancel_generation_task()
+            if queued_cancellations:
+                await self._broadcast_queued_function_call_cancellations(queued_cancellations)
             await self.push_frame(frame, direction)
         elif isinstance(frame, LLMRunFrame):
             logger.debug(f"{self}: ignoring {frame.name}; LLMContextFrame triggers inference")
         else:
             await self.push_frame(frame, direction)
-
-    async def _handle_context_frame(self, context: LLMContext):
-        await self._cancel_generation_task()
-        self._generation_task = self.create_task(
-            self._run_context_generation_task(context),
-            name="nemotron_omni_context_completion",
-        )
 
     async def _run_context_generation_task(self, context: LLMContext) -> None:
         try:
@@ -396,6 +440,143 @@ class NemotronOmniAudioLLMService(LLMService):
         if self._session:
             await self._session.close()
             self._session = None
+
+    def _latest_user_turn_key_from_messages(
+        self,
+        messages: list[dict[str, Any]],
+    ) -> str | None:
+        for message in reversed(messages):
+            if message.get("role") != "user":
+                continue
+            return json.dumps(
+                copy.deepcopy(message),
+                ensure_ascii=True,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        return None
+
+    def _latest_user_turn_key_from_context(self, context: LLMContext) -> str | None:
+        snapshot = self._normalized_request_snapshot(copy.deepcopy(context))
+        if snapshot is None:
+            return None
+        return self._latest_user_turn_key_from_messages(self._with_system_message(snapshot.messages))
+
+    def _reset_turn_tool_state(self, latest_user_key: str | None) -> None:
+        self._current_turn_user_key = latest_user_key
+        self._current_turn_round_count = 0
+        self._round_limit_closure_issued = False
+        self._turn_tool_results = {}
+        self._pending_followup_batch_id = None
+
+    def _mark_current_batch_stale(self) -> str | None:
+        if self._current_batch_id is not None:
+            self._stale_batch_ids.add(self._current_batch_id)
+        return self._current_batch_id
+
+    def _prepare_batch_supersession(self) -> list[FunctionCallFromLLM]:
+        batch_id = self._mark_current_batch_stale()
+        if batch_id is None:
+            self._pending_followup_batch_id = None
+            return []
+
+        batch_state = self._tool_batch_states.pop(batch_id, None)
+        if batch_state is None:
+            if self._pending_followup_batch_id == batch_id:
+                self._pending_followup_batch_id = None
+            if self._current_batch_id == batch_id:
+                self._current_batch_id = None
+            return []
+
+        for signature in batch_state.pending_signature_keys:
+            self._turn_tool_results.pop(signature, None)
+
+        if self._pending_followup_batch_id == batch_id:
+            self._pending_followup_batch_id = None
+        if self._current_batch_id == batch_id:
+            self._current_batch_id = None
+
+        queued_calls: list[FunctionCallFromLLM] = []
+        for runner_item in batch_state.runner_items:
+            if runner_item.tool_call_id in batch_state.started_ids:
+                continue
+            queued_calls.append(
+                FunctionCallFromLLM(
+                    function_name=runner_item.function_name,
+                    tool_call_id=runner_item.tool_call_id,
+                    arguments=runner_item.arguments,
+                    context=runner_item.context,
+                )
+            )
+        return queued_calls
+
+    def _maybe_credit_pending_followup_batch(self, latest_user_key: str | None) -> None:
+        batch_id = self._pending_followup_batch_id
+        if batch_id is None:
+            return
+        batch_state = self._tool_batch_states.get(batch_id)
+        if batch_state is None:
+            self._pending_followup_batch_id = None
+            return
+        if batch_state.user_turn_key != latest_user_key:
+            return
+
+        if batch_state.has_real_execution and not batch_state.round_counted:
+            self._current_turn_round_count += 1
+            batch_state.round_counted = True
+        self._pending_followup_batch_id = None
+        self._tool_batch_states.pop(batch_id, None)
+        if self._current_batch_id == batch_id:
+            self._current_batch_id = None
+
+    def _mark_batch_ready_for_followup(self, tool_call_id: str) -> bool:
+        batch_id = self._running_batch_id
+        if batch_id is None:
+            return False
+
+        batch_state = self._tool_batch_states.get(batch_id)
+        if batch_state is None:
+            return False
+
+        final_runner_item = next(
+            (runner_item for runner_item in batch_state.runner_items if runner_item.run_llm),
+            None,
+        )
+        if final_runner_item is None or final_runner_item.tool_call_id != tool_call_id:
+            return False
+
+        batch_state.completed = True
+        self._pending_followup_batch_id = batch_id
+        if batch_state.has_real_execution and not batch_state.round_counted:
+            self._current_turn_round_count += 1
+            batch_state.round_counted = True
+        return True
+
+    async def _await_generation_task_before_tool_followup(self) -> None:
+        task = self._generation_task
+        if task is None or task.done() or task is asyncio.current_task():
+            return
+        await asyncio.shield(task)
+
+    async def _cancel_running_sync_function_calls(self) -> None:
+        for function_name, entry in list(self._functions.items()):
+            if entry.cancel_on_interruption:
+                await self._cancel_function_call(function_name)
+
+    async def _broadcast_queued_function_call_cancellations(
+        self,
+        function_calls: list[FunctionCallFromLLM],
+    ) -> None:
+        if not function_calls:
+            return
+
+        for function_call in function_calls:
+            await self.broadcast_frame(
+                FunctionCallCancelFrame,
+                function_name=function_call.function_name,
+                tool_call_id=function_call.tool_call_id,
+            )
+        await self._call_event_handler("on_function_calls_cancelled", function_calls)
 
     def _messages_for_adapter_boundary(
         self,
@@ -501,30 +682,21 @@ class NemotronOmniAudioLLMService(LLMService):
         self,
         snapshot: NormalizedRequestSnapshot,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-        canonical_messages = self._canonical_messages_from_context(
-            snapshot.messages,
-            cache_shape_fingerprint=snapshot.cache_shape_fingerprint,
-        )
-        if canonical_messages is None:
+        full_messages = self._with_system_message(snapshot.messages)
+        if not full_messages or self._latest_user_turn_key_from_messages(full_messages) is None:
             logger.debug(f"{self}: ignoring LLM context without a latest user message")
             return None
 
-        self._context_lineage_messages = copy.deepcopy(canonical_messages)
-        self._context_lineage_cache_shape_fingerprint = snapshot.cache_shape_fingerprint
-
-        full_messages = copy.deepcopy(canonical_messages)
+        full_messages = copy.deepcopy(full_messages)
         if self._strip_historical_audio_from_payload:
             full_messages = self._strip_historical_audio_from_messages(full_messages)
-        payload_messages, requires_cache = self._conversation_payload_messages(full_messages)
         payload: dict[str, Any] = {
             "model": self._settings.model,
-            "messages": payload_messages,
+            "messages": copy.deepcopy(full_messages),
             "stream": True,
             "stream_options": {"include_usage": True},
             "_cache_shape_fingerprint": snapshot.cache_shape_fingerprint,
         }
-        if requires_cache:
-            payload["conversation_require_cache"] = True
         if snapshot.tools is not None:
             payload["tools"] = copy.deepcopy(snapshot.tools)
             if snapshot.tool_choice is not None:
@@ -549,9 +721,6 @@ class NemotronOmniAudioLLMService(LLMService):
 
         if self._settings.extra:
             payload.update(self._settings.extra)
-
-        if self._conversation_id:
-            payload["conversation_id"] = self._conversation_id
 
         return payload, full_messages
 
@@ -594,41 +763,6 @@ class NemotronOmniAudioLLMService(LLMService):
                 "from payload messages"
             )
         return stripped_messages
-
-    def _conversation_payload_messages(
-        self,
-        messages: list[dict[str, Any]],
-    ) -> tuple[list[dict[str, Any]], bool]:
-        if (
-            not self._conversation_id
-            or not self._suffix_only_conversation
-            or not self._conversation_cache_committed
-        ):
-            return copy.deepcopy(messages), False
-
-        latest_user = self._latest_user_message(messages)
-        if latest_user is None:
-            logger.warning(
-                f"{self}: suffix-only conversation mode found no user message; "
-                "sending full context"
-            )
-            return copy.deepcopy(messages), False
-
-        logger.debug(
-            f"{self}: suffix-only conversation payload uses latest user message "
-            f"with {self._count_audio_parts([latest_user])} audio parts"
-        )
-        return [latest_user], True
-
-    def _latest_user_message(
-        self,
-        messages: list[dict[str, Any]],
-    ) -> dict[str, Any] | None:
-        for message in reversed(messages):
-            if message.get("role") != "user":
-                continue
-            return copy.deepcopy(message)
-        return None
 
     def _convert_context_message(self, message: Any) -> dict[str, Any] | None:
         if isinstance(message, LLMSpecificMessage):
@@ -721,85 +855,6 @@ class NemotronOmniAudioLLMService(LLMService):
                 parts.append(role)
         return ",".join(parts)
 
-    def _canonical_messages_from_context(
-        self,
-        context_messages: list[dict[str, Any]],
-        *,
-        cache_shape_fingerprint: str,
-    ) -> list[dict[str, Any]] | None:
-        canonical_messages = self._with_system_message(context_messages)
-        if (
-            not canonical_messages
-            or canonical_messages[-1].get("role") != "user"
-            or self._latest_user_message(canonical_messages) is None
-        ):
-            return None
-
-        if not self._context_messages_extend_observed_lineage(
-            canonical_messages,
-            cache_shape_fingerprint=cache_shape_fingerprint,
-        ):
-            self._rotate_conversation_cache_lineage(
-                canonical_messages,
-                cache_shape_fingerprint=cache_shape_fingerprint,
-            )
-        return canonical_messages
-
-    def _context_messages_extend_observed_lineage(
-        self,
-        observed_messages: list[dict[str, Any]],
-        *,
-        cache_shape_fingerprint: str,
-    ) -> bool:
-        lineage_count = len(self._context_lineage_messages)
-        if lineage_count == 0:
-            return True
-        if self._context_lineage_cache_shape_fingerprint != cache_shape_fingerprint:
-            return False
-        if len(observed_messages) < lineage_count:
-            return False
-        return observed_messages[:lineage_count] == self._context_lineage_messages
-
-    def _rotate_conversation_cache_lineage(
-        self,
-        observed_messages: list[dict[str, Any]],
-        *,
-        cache_shape_fingerprint: str,
-    ) -> None:
-        old_conversation_id = self._conversation_id
-        if self._conversation_id:
-            self._conversation_id = f"pipecat-{uuid.uuid4().hex}"
-            logger.info(
-                f"{self}: rotating conversation_id from {old_conversation_id} "
-                f"to {self._conversation_id} after non-append context change"
-            )
-        else:
-            logger.info(
-                f"{self}: resetting uncached conversation lineage after "
-                "non-append context change"
-            )
-        logger.debug(
-            f"{self}: committed roles={self._message_role_summary(self._context_lineage_messages)} "
-            f"observed roles={self._message_role_summary(observed_messages)} "
-            f"committed_cache_shape={self._context_lineage_cache_shape_fingerprint!r} "
-            f"observed_cache_shape={cache_shape_fingerprint!r}"
-        )
-        self._conversation_cache_committed = False
-        self._canonical_messages = []
-        self._context_lineage_messages = []
-        self._context_lineage_cache_shape_fingerprint = None
-
-    def _commit_canonical_messages(
-        self,
-        full_messages: list[dict[str, Any]],
-        *,
-        assistant_text: str,
-    ) -> None:
-        committed_messages = self._with_system_message(full_messages)
-        if assistant_text:
-            committed_messages.append({"role": "assistant", "content": assistant_text})
-        self._canonical_messages = committed_messages
-
     def _with_system_message(
         self,
         messages: list[dict[str, Any]],
@@ -818,9 +873,8 @@ class NemotronOmniAudioLLMService(LLMService):
         return [system_message, *normalized_messages]
 
     def _trace_request_id(self, top_level_request_seq: int, attempt_num: int) -> str:
-        conversation_part = self._conversation_id or "no-conversation"
         return (
-            f"nemotron-{conversation_part}-turn-{top_level_request_seq:03d}-"
+            f"nemotron-no-conversation-turn-{top_level_request_seq:03d}-"
             f"attempt-{attempt_num:02d}"
         )
 
@@ -893,7 +947,7 @@ class NemotronOmniAudioLLMService(LLMService):
             return
 
         payload, full_messages = payload_info
-        await self._run_completion_payload(
+        result = await self._run_completion_payload(
             payload,
             full_messages=full_messages,
             request_description=(
@@ -902,6 +956,33 @@ class NemotronOmniAudioLLMService(LLMService):
             ),
             start_ttfb=True,
         )
+        if result is None or not result.tool_calls:
+            return
+
+        function_calls = self._function_calls_from_tool_calls(
+            result.tool_calls,
+            context=context,
+        )
+        if not function_calls:
+            return
+
+        if self._round_limit_closure_issued:
+            logger.warning(
+                f"{self}: tool closure pass for user turn requested more sync tools; "
+                "executing no additional tool work"
+            )
+            return
+
+        if self._current_turn_round_count >= self._bash_tool_max_rounds:
+            logger.warning(
+                f"{self}: reached bash tool round limit ({self._bash_tool_max_rounds}); "
+                "synthesizing terminal tool results for closure pass"
+            )
+            self._round_limit_closure_issued = True
+            await self._emit_round_limit_results(function_calls)
+            return
+
+        await self.run_function_calls(function_calls)
 
     async def _run_completion_payload(
         self,
@@ -910,15 +991,8 @@ class NemotronOmniAudioLLMService(LLMService):
         full_messages: list[dict[str, Any]],
         request_description: str,
         start_ttfb: bool,
-    ):
+    ) -> ChatCompletionPassResult | None:
         started_at = time.perf_counter()
-        first_token = True
-        output_text_parts: list[str] = []
-        tool_rounds = 0
-        completed = False
-        recovered_from_cache_miss = False
-        seen_tool_results_by_signature: dict[tuple[str, str], str] = {}
-        final_assistant_text = ""
         self._top_level_request_seq += 1
         top_level_request_seq = self._top_level_request_seq
 
@@ -934,129 +1008,45 @@ class NemotronOmniAudioLLMService(LLMService):
                 timeout = aiohttp.ClientTimeout(total=self._request_timeout_secs)
                 self._session = aiohttp.ClientSession(timeout=timeout)
 
-            cache_info = (
-                f" with conversation_id={self._conversation_id}"
-                if self._conversation_id
-                else ""
+            logger.debug(f"{self}: sending {request_description}")
+            trace_id = self._trace_request_id(top_level_request_seq, 1)
+            attempt_messages = payload.get("messages")
+            if not isinstance(attempt_messages, list):
+                attempt_messages = []
+            logger.debug(
+                f"{self}: completion attempt 1 "
+                f"messages={len(attempt_messages)} "
+                f"roles={self._message_role_summary(attempt_messages)} "
+                f"audio_parts={self._count_audio_parts(attempt_messages)}"
             )
-            logger.debug(f"{self}: sending {request_description}{cache_info}")
-
-            current_payload = copy.deepcopy(payload)
-            current_full_messages = copy.deepcopy(full_messages)
-            retried_full_context = False
-            attempt_num = 0
-            while True:
-                attempt_num += 1
-                trace_id = self._trace_request_id(top_level_request_seq, attempt_num)
-                attempt_messages = current_payload.get("messages")
-                if not isinstance(attempt_messages, list):
-                    attempt_messages = []
-                logger.debug(
-                    f"{self}: completion attempt {attempt_num} "
-                    f"messages={len(attempt_messages)} "
-                    f"roles={self._message_role_summary(attempt_messages)} "
-                    f"audio_parts={self._count_audio_parts(attempt_messages)} "
-                    f"require_cache={bool(current_payload.get('conversation_require_cache'))}"
-                )
-                http_payload = self._http_payload(current_payload)
-                self._write_trace_file(
-                    trace_id=trace_id,
-                    phase="client-request",
-                    payload={
-                        "request_description": request_description,
-                        "conversation_id": self._conversation_id,
-                        "suffix_only_conversation": self._suffix_only_conversation,
-                        "conversation_cache_committed": self._conversation_cache_committed,
-                        "messages_role_summary": self._message_role_summary(
-                            attempt_messages
-                        ),
-                        "http_payload": http_payload,
-                        "conversation_full_messages": current_full_messages,
-                    },
-                )
-                try:
-                    result = await self._stream_completion_pass(
-                        current_payload,
-                        headers={**headers, "X-Request-Id": trace_id},
-                        first_token=first_token,
-                        trace_id=trace_id,
-                    )
-                except ConversationCacheMissError:
-                    if retried_full_context:
-                        raise
-                    full_payload = self._full_context_retry_payload(
-                        current_payload,
-                        current_full_messages,
-                    )
-                    recovered_from_cache_miss = True
-                    retried_full_context = True
-                    current_payload = full_payload
-                    logger.info(
-                        f"{self}: conversation cache miss for "
-                        f"{self._conversation_id}; retrying with full context"
-                    )
-                    continue
-                first_token = result.first_token
-                if result.output_text:
-                    output_text_parts.append(result.output_text)
-
-                if not result.tool_calls:
-                    final_assistant_text = result.output_text
-                    break
-                if not self._enable_bash_tool:
-                    logger.warning(
-                        f"{self}: model requested tool calls but bash tool is disabled"
-                    )
-                    break
-                if tool_rounds >= self._bash_tool_max_rounds:
-                    logger.warning(
-                        f"{self}: reached bash tool round limit "
-                        f"({self._bash_tool_max_rounds})"
-                    )
-                    break
-
-                tool_rounds += 1
-                logger.debug(
-                    f"{self}: executing {len(result.tool_calls)} tool call(s) "
-                    f"for round {tool_rounds}"
-                )
-                tool_messages = await self._execute_tool_calls(
-                    result.tool_calls,
-                    seen_tool_results_by_signature=seen_tool_results_by_signature,
-                )
-                current_payload, current_full_messages = self._payload_after_tool_calls(
-                    current_payload,
-                    current_full_messages,
-                    assistant_text=result.output_text,
-                    tool_calls=result.tool_calls,
-                    tool_messages=tool_messages,
-                )
-
-            completed = True
-            self._commit_canonical_messages(
-                current_full_messages,
-                assistant_text=final_assistant_text,
+            self._write_trace_file(
+                trace_id=trace_id,
+                phase="client-request",
+                payload={
+                    "request_description": request_description,
+                    "messages_role_summary": self._message_role_summary(attempt_messages),
+                    "http_payload": self._http_payload(payload),
+                    "conversation_full_messages": full_messages,
+                },
             )
-            if self._conversation_id:
-                self._conversation_cache_committed = not recovered_from_cache_miss
-                if recovered_from_cache_miss:
-                    logger.debug(
-                        f"{self}: keeping suffix-only conversation mode disabled "
-                        "for the next turn after cache-miss recovery"
-                    )
+            result = await self._stream_completion_pass(
+                payload,
+                headers={**headers, "X-Request-Id": trace_id},
+                first_token=True,
+                trace_id=trace_id,
+            )
             logger.debug(
                 f"{self}: completed response in {time.perf_counter() - started_at:.3f}s: "
-                f"{''.join(output_text_parts)!r}"
+                f"{result.output_text!r}"
             )
+            return result
         except asyncio.CancelledError:
             logger.debug(f"{self}: completion cancelled")
             raise
         except Exception as e:
             logger.error(f"{self}: completion failed: {e}")
             await self.push_frame(ErrorFrame(error=str(e)))
-        finally:
-            if not completed and self._conversation_id:
-                logger.debug(f"{self}: conversation cache commit unchanged after failed request")
+            return None
 
     async def _stream_completion_pass(
         self,
@@ -1084,8 +1074,6 @@ class NemotronOmniAudioLLMService(LLMService):
                         "response_text": error_text,
                     },
                 )
-                if self._is_conversation_cache_miss(response.status, error_text):
-                    raise ConversationCacheMissError(error_text)
                 raise RuntimeError(
                     f"vLLM request failed with {response.status}: {error_text}"
                 )
@@ -1148,28 +1136,81 @@ class NemotronOmniAudioLLMService(LLMService):
             if not key.startswith("_")
         }
 
-    @staticmethod
-    def _is_conversation_cache_miss(status: int, error_text: str) -> bool:
-        if status != 409:
-            return False
-        try:
-            data = json.loads(error_text)
-        except json.JSONDecodeError:
-            return False
-        error = data.get("error")
-        if not isinstance(error, dict):
-            return False
-        return error.get("type") == "ConversationCacheMissError"
-
-    def _full_context_retry_payload(
+    def _function_calls_from_tool_calls(
         self,
-        payload: dict[str, Any],
-        full_messages: list[dict[str, Any]],
-    ) -> dict[str, Any]:
-        retry_payload = copy.deepcopy(payload)
-        retry_payload["messages"] = copy.deepcopy(full_messages)
-        retry_payload.pop("conversation_require_cache", None)
-        return retry_payload
+        tool_calls: list[dict[str, Any]],
+        *,
+        context: LLMContext,
+    ) -> list[FunctionCallFromLLM]:
+        function_calls: list[FunctionCallFromLLM] = []
+        for index, tool_call in enumerate(tool_calls):
+            function = tool_call.get("function") or {}
+            function_name = function.get("name") or ""
+            arguments_text = function.get("arguments") or "{}"
+            try:
+                arguments = json.loads(arguments_text)
+            except json.JSONDecodeError:
+                logger.warning(
+                    f"{self}: failed to parse function call arguments for "
+                    f"{function_name or '<missing-name>'}: {arguments_text}"
+                )
+                continue
+            if not isinstance(arguments, dict):
+                logger.warning(
+                    f"{self}: function call arguments for {function_name or '<missing-name>'} "
+                    "did not decode to an object"
+                )
+                continue
+            function_calls.append(
+                FunctionCallFromLLM(
+                    context=context,
+                    tool_call_id=tool_call.get("id") or f"call_{index}",
+                    function_name=function_name,
+                    arguments=arguments,
+                )
+            )
+        return function_calls
+
+    async def _emit_round_limit_results(
+        self,
+        function_calls: list[FunctionCallFromLLM],
+    ) -> None:
+        if not function_calls:
+            return
+
+        await self._call_event_handler("on_function_calls_started", function_calls)
+        await self.broadcast_frame(FunctionCallsStartedFrame, function_calls=function_calls)
+
+        for index, function_call in enumerate(function_calls):
+            await self.broadcast_frame(
+                FunctionCallInProgressFrame,
+                function_name=function_call.function_name,
+                tool_call_id=function_call.tool_call_id,
+                arguments=function_call.arguments,
+                cancel_on_interruption=True,
+                group_id=None,
+            )
+            result = self._build_bash_tool_result(
+                command=str(function_call.arguments.get("code") or ""),
+                command_started=False,
+                exit_code=None,
+                stdout_text="",
+                stderr_text="",
+                timed_out=False,
+                status_override="round_limit_reached",
+                summary_override=(
+                    "The per-user-turn sync tool round limit was reached. "
+                    "Do not call the tool again; answer from this observation."
+                ),
+            )
+            await self.broadcast_frame(
+                FunctionCallResultFrame,
+                function_name=function_call.function_name,
+                tool_call_id=function_call.tool_call_id,
+                arguments=function_call.arguments,
+                result=result,
+                run_llm=index == len(function_calls) - 1,
+            )
 
     @staticmethod
     def _merge_tool_call_delta(
@@ -1217,139 +1258,104 @@ class NemotronOmniAudioLLMService(LLMService):
             tool_calls.append(tool_call)
         return tool_calls
 
-    def _payload_after_tool_calls(
+    async def _run_sequential_function_calls(
         self,
-        payload: dict[str, Any],
-        full_messages: list[dict[str, Any]],
-        assistant_text: str,
-        tool_calls: list[dict[str, Any]],
-        tool_messages: list[dict[str, Any]],
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        assistant_tool_call_message = self._assistant_tool_call_message(
-            tool_calls,
-            assistant_text=assistant_text,
-        )
-        next_payload = copy.deepcopy(payload)
-        next_full_messages = [
-            *copy.deepcopy(full_messages),
-            assistant_tool_call_message,
-            *copy.deepcopy(tool_messages),
-        ]
-        if self._conversation_id:
-            # vLLM's frontend ledger reconstructs the assistant tool-call
-            # message. The engine cache physically commits only a prompt-prefix
-            # checkpoint, so send just the tool-result suffix and require cache
-            # to avoid duplicating the same top-level turn.
-            next_payload["messages"] = copy.deepcopy(tool_messages)
-            next_payload["conversation_require_cache"] = True
-        else:
-            next_payload["messages"] = [
-                *copy.deepcopy(payload["messages"]),
-                assistant_tool_call_message,
-                *copy.deepcopy(tool_messages),
-            ]
-        # Keep tool definitions stable across tool-followup requests. vLLM feeds
-        # `tools` into the chat template, so removing them shrinks the prompt and
-        # breaks exact conversation-cache attach on the next round.
-        return next_payload, next_full_messages
-
-    @staticmethod
-    def _assistant_tool_call_message(
-        tool_calls: list[dict[str, Any]],
-        *,
-        assistant_text: str,
-    ) -> dict[str, Any]:
-        content: str | None = assistant_text or None
-        return {
-            "role": "assistant",
-            "content": content,
-            "tool_calls": copy.deepcopy(tool_calls),
-        }
-
-    async def _execute_tool_calls(
-        self,
-        tool_calls: list[dict[str, Any]],
-        *,
-        seen_tool_results_by_signature: dict[tuple[str, str], dict[str, Any]] | None = None,
-    ) -> list[dict[str, Any]]:
-        tool_messages: list[dict[str, Any]] = []
-        signature_results = seen_tool_results_by_signature or {}
-        for tool_call in tool_calls:
-            signature = self._tool_call_signature(tool_call)
-            if signature and signature in signature_results:
-                result_dict = self._duplicate_tool_result(signature_results[signature])
-                result = self._tool_result_json(result_dict)
-                logger.debug(
-                    f"{self}: suppressing duplicate tool call within one user turn: "
-                    f"{signature[0]} {signature[1]!r}"
+        runner_items: list[FunctionCallRunnerItem] | tuple[FunctionCallRunnerItem, ...],
+    ):
+        batch_id = uuid.uuid4().hex
+        serial_runner_items: list[SerialFunctionCallRunnerItem] = []
+        for index, runner_item in enumerate(runner_items):
+            serial_runner_items.append(
+                SerialFunctionCallRunnerItem(
+                    registry_item=runner_item.registry_item,
+                    function_name=runner_item.function_name,
+                    tool_call_id=runner_item.tool_call_id,
+                    arguments=runner_item.arguments,
+                    context=runner_item.context,
+                    run_llm=index == len(runner_items) - 1,
+                    group_id=runner_item.group_id,
+                    batch_id=batch_id,
                 )
-                await self._send_bash_tool_event(
-                    {
-                        "phase": "duplicate_suppressed",
-                        "guardrail_triggered": True,
-                        "guardrail_kind": "duplicate_tool_call",
-                        "guardrail_reason": "exact_duplicate_command",
-                        "tool_call_id": tool_call.get("id") or "call_0",
-                        "name": signature[0],
-                        "signature": signature[1],
-                        "result": result_dict,
-                    }
-                )
-            else:
-                result = await self._execute_tool_call(tool_call)
-                if signature:
-                    signature_results[signature] = self._parse_tool_result_json(result)
-            tool_messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": tool_call.get("id") or "call_0",
-                    "name": (tool_call.get("function") or {}).get("name") or "",
-                    "content": result,
-                }
             )
-        return tool_messages
 
-    @staticmethod
-    def _tool_call_signature(
-        tool_call: dict[str, Any]
-    ) -> tuple[str, str] | None:
-        function = tool_call.get("function") or {}
-        name = function.get("name") or ""
-        if name != BASH_TOOL_NAME:
-            return None
+        self._current_batch_id = batch_id
+        self._tool_batch_states[batch_id] = ToolBatchState(
+            batch_id=batch_id,
+            user_turn_key=self._current_turn_user_key,
+            runner_items=serial_runner_items,
+        )
+        await super()._run_sequential_function_calls(serial_runner_items)
 
-        arguments_text = function.get("arguments") or "{}"
-        try:
-            arguments = json.loads(arguments_text)
-        except json.JSONDecodeError:
-            return None
+    async def _sequential_runner_handler(self):
+        while True:
+            runner_item = await self._sequential_runner_queue.get()
+            batch_id = getattr(runner_item, "batch_id", "")
+            if batch_id and batch_id in self._stale_batch_ids:
+                logger.debug(
+                    f"{self}: discarding stale queued tool call "
+                    f"[{runner_item.function_name}:{runner_item.tool_call_id}]"
+                )
+                continue
 
-        code = arguments.get("code")
-        if not isinstance(code, str):
-            return None
+            batch_state = self._tool_batch_states.get(batch_id)
+            if batch_state is not None:
+                batch_state.started_ids.add(runner_item.tool_call_id)
 
-        normalized_code = code.strip()
-        if not normalized_code:
-            return None
-        return name, normalized_code
+            self._running_batch_id = batch_id or None
+            task = self.create_task(self._run_function_call(runner_item))
+            self._function_call_tasks[task] = runner_item
+            try:
+                await task
+                if batch_state is not None and runner_item.run_llm:
+                    batch_state.completed = True
+                    self._pending_followup_batch_id = batch_id
+            except asyncio.CancelledError:
+                pass
+            finally:
+                self._function_call_tasks.pop(task, None)
+                if self._running_batch_id == batch_id:
+                    self._running_batch_id = None
 
-    @staticmethod
-    def _duplicate_tool_result(previous_result: dict[str, Any]) -> dict[str, Any]:
-        reused_status = str(previous_result.get("status") or "unknown")
-        return {
-            "ok": bool(previous_result.get("ok")),
-            "status": "duplicate_suppressed",
-            "summary": (
-                "Exact duplicate command suppressed in this assistant turn. "
-                f"Reused the prior result instead of re-running it. Original status: "
-                f"{reused_status}."
-            ),
-            "command": str(previous_result.get("command") or ""),
-            "exit_code": previous_result.get("exit_code"),
-            "timed_out": bool(previous_result.get("timed_out")),
-            "stdout": str(previous_result.get("stdout") or ""),
-            "stderr": str(previous_result.get("stderr") or ""),
-        }
+    async def _handle_interruptions(self, frame: InterruptionFrame):
+        self._mark_current_batch_stale()
+        await super()._handle_interruptions(frame)
+
+    async def _cancel_function_call(self, function_name: str | None):
+        cancelled_tasks = set()
+        cancelled_items = []
+        for task, runner_item in list(self._function_call_tasks.items()):
+            if runner_item.registry_item.function_name != function_name:
+                continue
+
+            name = runner_item.function_name
+            tool_call_id = runner_item.tool_call_id
+            logger.debug(f"{self} Cancelling function call [{name}:{tool_call_id}]...")
+
+            if task:
+                task.remove_done_callback(self._function_call_task_finished)
+                await self.cancel_task(task)
+                cancelled_tasks.add(task)
+
+            await self.broadcast_frame(
+                FunctionCallCancelFrame,
+                function_name=name,
+                tool_call_id=tool_call_id,
+            )
+            cancelled_items.append(
+                FunctionCallFromLLM(
+                    function_name=runner_item.function_name,
+                    tool_call_id=runner_item.tool_call_id,
+                    arguments=runner_item.arguments,
+                    context=runner_item.context,
+                )
+            )
+            logger.debug(f"{self} Function call [{name}:{tool_call_id}] has been cancelled")
+
+        for task in cancelled_tasks:
+            self._function_call_task_finished(task)
+
+        if cancelled_items:
+            await self._call_event_handler("on_function_calls_cancelled", cancelled_items)
 
     async def _handle_run_bash_function_call(self, params: FunctionCallParams) -> None:
         result = await self._execute_bash_tool_request(
@@ -1357,47 +1363,9 @@ class NemotronOmniAudioLLMService(LLMService):
             tool_call_id=params.tool_call_id,
             function_name=params.function_name,
         )
+        if self._mark_batch_ready_for_followup(params.tool_call_id):
+            await self._await_generation_task_before_tool_followup()
         await params.result_callback(result)
-
-    async def _execute_tool_call(self, tool_call: dict[str, Any]) -> str:
-        function = tool_call.get("function") or {}
-        name = function.get("name") or ""
-        if name != BASH_TOOL_NAME:
-            return self._tool_result_json(
-                self._build_bash_tool_result(
-                    command="",
-                    command_started=False,
-                    exit_code=None,
-                    stdout_text="",
-                    stderr_text="",
-                    timed_out=False,
-                    status_override="unsupported_tool",
-                    summary_override=f"Unsupported tool: {name!r}",
-                )
-            )
-
-        arguments_text = function.get("arguments") or "{}"
-        try:
-            arguments = json.loads(arguments_text)
-        except json.JSONDecodeError as exc:
-            return self._tool_result_json(
-                self._build_bash_tool_result(
-                    command="",
-                    command_started=False,
-                    exit_code=None,
-                    stdout_text="",
-                    stderr_text="",
-                    timed_out=False,
-                    status_override="invalid_arguments",
-                    summary_override=f"Invalid JSON arguments: {exc}",
-                )
-            )
-        result = await self._execute_bash_tool_request(
-            arguments=arguments,
-            tool_call_id=tool_call.get("id") or "call_0",
-            function_name=name,
-        )
-        return self._tool_result_json(result)
 
     async def _execute_bash_tool_request(
         self,
@@ -1451,7 +1419,49 @@ class NemotronOmniAudioLLMService(LLMService):
                 ),
             )
 
-        return await self._run_bash_tool(normalized_code, tool_call_id=tool_call_id)
+        signature = (function_name, normalized_code)
+        previous_result = self._turn_tool_results.get(signature)
+        if previous_result is not None:
+            result = {
+                "ok": bool(previous_result.get("ok")),
+                "status": "duplicate_suppressed",
+                "summary": (
+                    "Exact duplicate command suppressed in this assistant turn. "
+                    "Reused the prior result instead of re-running it. "
+                    f"Original status: {previous_result.get('status') or 'unknown'}."
+                ),
+                "command": str(previous_result.get("command") or ""),
+                "exit_code": previous_result.get("exit_code"),
+                "timed_out": bool(previous_result.get("timed_out")),
+                "stdout": str(previous_result.get("stdout") or ""),
+                "stderr": str(previous_result.get("stderr") or ""),
+            }
+            logger.debug(
+                f"{self}: suppressing duplicate tool call within one user turn: "
+                f"{function_name} {normalized_code!r}"
+            )
+            await self._send_bash_tool_event(
+                {
+                    "phase": "duplicate_suppressed",
+                    "guardrail_triggered": True,
+                    "guardrail_kind": "duplicate_tool_call",
+                    "guardrail_reason": "exact_duplicate_command",
+                    "tool_call_id": tool_call_id,
+                    "name": function_name,
+                    "signature": normalized_code,
+                    "result": result,
+                }
+            )
+            return result
+
+        result = await self._run_bash_tool(normalized_code, tool_call_id=tool_call_id)
+        self._turn_tool_results[signature] = copy.deepcopy(result)
+        if self._running_batch_id is not None:
+            batch_state = self._tool_batch_states.get(self._running_batch_id)
+            if batch_state is not None:
+                batch_state.pending_signature_keys.add(signature)
+                batch_state.has_real_execution = True
+        return result
 
     @staticmethod
     def _is_prose_echo_command(code: str) -> bool:
@@ -1675,13 +1685,6 @@ class NemotronOmniAudioLLMService(LLMService):
     @staticmethod
     def _tool_result_json(payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=True)
-
-    @staticmethod
-    def _parse_tool_result_json(payload: str) -> dict[str, Any]:
-        parsed = json.loads(payload)
-        if not isinstance(parsed, dict):
-            raise ValueError("tool result JSON did not decode to an object")
-        return parsed
 
     async def _iter_sse_events(self, response: aiohttp.ClientResponse):
         buffer = ""

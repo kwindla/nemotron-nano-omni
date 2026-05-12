@@ -1,0 +1,190 @@
+[2026-05-12T21:43:05.729Z] Starting Codex Task.
+[2026-05-12T21:43:08.144Z] Starting Codex task thread.
+[2026-05-12T21:43:08.442Z] Thread ready (019e1e24-cb73-7fc1-8e34-9332267f25e7).
+[2026-05-12T21:43:08.467Z] Turn started (019e1e24-cbac-7a10-b97a-bc15dd1fb2fb).
+[2026-05-12T21:43:24.780Z] Assistant message captured: Reviewing the uncommitted step-3 changes against the intended contract and Pipecat stock beha...
+
+[2026-05-12T21:43:24.780Z] Assistant message
+Reviewing the uncommitted step-3 changes against the intended contract and Pipecat stock behavior first. I’m pulling the diff, the plan step, and the relevant base classes before I judge the race and state-machine paths.
+[2026-05-12T21:43:24.824Z] Running command: /bin/bash -lc 'rg -n "step 3|Step 3|serial tool|conversation caching|function-call re-entry|P...
+[2026-05-12T21:43:24.843Z] Command completed: /bin/bash -lc 'rg -n "step 3|Step 3|serial tool|conversation caching|function-call re-entry|P... (exit 0)
+[2026-05-12T21:43:24.843Z] Running command: /bin/bash -lc 'git diff -- src/nemotron_voice/services/nvidia/nemotron_omni.py src/nemotron_v...
+[2026-05-12T21:43:24.859Z] Command completed: /bin/bash -lc 'git diff -- src/nemotron_voice/services/nvidia/nemotron_omni.py src/nemotron_v... (exit 0)
+[2026-05-12T21:43:24.865Z] Running command: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-12T21:43:24.881Z] Command completed: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-12T21:43:24.889Z] Running command: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T21:43:24.890Z] Command completed: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T21:43:24.909Z] Running command: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/processors/aggregators/llm_respo...
+[2026-05-12T21:43:24.909Z] Command completed: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/processors/aggregators/llm_respo... (exit 0)
+[2026-05-12T21:43:24.923Z] Running command: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/pipeline/parallel_pipeline.py"
+[2026-05-12T21:43:24.923Z] Command completed: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/pipeline/parallel_pipeline.py" (exit 0)
+[2026-05-12T21:43:36.137Z] Assistant message captured: I have the step-3 contract and the base Pipecat runner behavior. Next I’m reading the exact o...
+
+[2026-05-12T21:43:36.137Z] Assistant message
+I have the step-3 contract and the base Pipecat runner behavior. Next I’m reading the exact override seams in `nemotron_omni.py` and the new tests around cancellation, stale batches, and routing.
+[2026-05-12T21:43:36.179Z] Running command: /bin/bash -lc 'rg -n "_sequential_runner_handler|_handle_interruptions|_cancel_function_call|...
+[2026-05-12T21:43:36.179Z] Command completed: /bin/bash -lc 'rg -n "_sequential_runner_handler|_handle_interruptions|_cancel_function_call|... (exit 0)
+[2026-05-12T21:43:36.183Z] Running command: /bin/bash -lc 'rg -n "def _sequential_runner_handler|def _handle_interruptions|def _cancel_fu...
+[2026-05-12T21:43:36.183Z] Command completed: /bin/bash -lc 'rg -n "def _sequential_runner_handler|def _handle_interruptions|def _cancel_fu... (exit 0)
+[2026-05-12T21:43:36.218Z] Running command: /bin/bash -lc 'rg -n "cancel-running-tool|stale|queued|round_limit|ParallelPipeline|FunctionC...
+[2026-05-12T21:43:36.235Z] Command completed: /bin/bash -lc 'rg -n "cancel-running-tool|stale|queued|round_limit|ParallelPipeline|FunctionC... (exit 0)
+[2026-05-12T21:43:44.664Z] Running command: /bin/bash -lc "sed -n '1,260p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T21:43:44.689Z] Command completed: /bin/bash -lc "sed -n '1,260p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T21:43:44.689Z] Running command: /bin/bash -lc "sed -n '260,620p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T21:43:44.689Z] Running command: /bin/bash -lc "sed -n '620,980p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T21:43:44.689Z] Command completed: /bin/bash -lc "sed -n '260,620p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T21:43:44.689Z] Command completed: /bin/bash -lc "sed -n '620,980p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T21:43:44.705Z] Running command: /bin/bash -lc "sed -n '980,1380p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T21:43:44.706Z] Command completed: /bin/bash -lc "sed -n '980,1380p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T21:43:44.707Z] Running command: /bin/bash -lc "sed -n '1380,1600p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T21:43:44.707Z] Command completed: /bin/bash -lc "sed -n '1380,1600p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T21:43:50.181Z] Running command: /bin/bash -lc "sed -n '1600,1760p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T21:43:50.181Z] Command completed: /bin/bash -lc "sed -n '1600,1760p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T21:43:50.189Z] Running command: /bin/bash -lc "sed -n '820,930p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T21:43:50.189Z] Command completed: /bin/bash -lc "sed -n '820,930p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T21:43:50.229Z] Running command: /bin/bash -lc "sed -n '1100,1215p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T21:43:50.230Z] Command completed: /bin/bash -lc "sed -n '1100,1215p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T21:43:59.139Z] Assistant message captured: The service overrides are in place. I’m reading the exact tests now against the relevant path...
+
+[2026-05-12T21:43:59.139Z] Assistant message
+The service overrides are in place. I’m reading the exact tests now against the relevant paths the plan calls out: stale queued cancellation accounting, round-limit closure, generation-task ordering, and the ParallelPipeline routing check.
+[2026-05-12T21:43:59.174Z] Running command: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T21:43:59.192Z] Command completed: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T21:43:59.233Z] Running command: /bin/bash -lc "sed -n '760,1160p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T21:43:59.233Z] Command completed: /bin/bash -lc "sed -n '760,1160p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T21:43:59.236Z] Running command: /bin/bash -lc "sed -n '260,760p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T21:43:59.237Z] Command completed: /bin/bash -lc "sed -n '260,760p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T21:43:59.256Z] Running command: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_conversation_cache.py"
+[2026-05-12T21:43:59.256Z] Command completed: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_conversation_cache.py" (exit 0)
+[2026-05-12T21:43:59.260Z] Running command: /bin/bash -lc "sed -n '1160,1360p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T21:43:59.260Z] Command completed: /bin/bash -lc "sed -n '1160,1360p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T21:44:05.043Z] Running command: /bin/bash -lc "sed -n '400,470p' src/nemotron_voice/bot.py"
+[2026-05-12T21:44:05.060Z] Command completed: /bin/bash -lc "sed -n '400,470p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-12T21:44:05.060Z] Running command: /bin/bash -lc "sed -n '260,520p' tests/test_nemotron_omni_conversation_cache.py"
+[2026-05-12T21:44:05.078Z] Command completed: /bin/bash -lc "sed -n '260,520p' tests/test_nemotron_omni_conversation_cache.py" (exit 0)
+[2026-05-12T21:44:14.437Z] Assistant message captured: I’m checking for dead references from the deleted conversation-cache/internal-loop helpers an...
+
+[2026-05-12T21:44:14.437Z] Assistant message
+I’m checking for dead references from the deleted conversation-cache/internal-loop helpers and then walking the stock assistant aggregator paths to verify what frame sequences actually guarantee on cancellation and followup.
+[2026-05-12T21:44:14.483Z] Running command: /bin/bash -lc 'rg -n "_handle_context_frame|_execute_tool_calls|_execute_tool_call|_payload_a...
+[2026-05-12T21:44:14.483Z] Command failed: /bin/bash -lc 'rg -n "_handle_context_frame|_execute_tool_calls|_execute_tool_call|_payload_a... (exit 1)
+[2026-05-12T21:44:14.484Z] Running command: /bin/bash -lc 'rg -n "FunctionCallResultFrame|FunctionCallCancelFrame|run_llm|has_function_ca...
+[2026-05-12T21:44:14.503Z] Command completed: /bin/bash -lc 'rg -n "FunctionCallResultFrame|FunctionCallCancelFrame|run_llm|has_function_ca... (exit 0)
+[2026-05-12T21:44:14.520Z] Running command: /bin/bash -lc "sed -n '430,860p' pipecat-core-code/src/pipecat/processors/aggregators/llm_res...
+[2026-05-12T21:44:14.520Z] Command completed: /bin/bash -lc "sed -n '430,860p' pipecat-core-code/src/pipecat/processors/aggregators/llm_res... (exit 0)
+[2026-05-12T21:44:19.519Z] Running command: /bin/bash -lc "sed -n '1040,1465p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r...
+[2026-05-12T21:44:19.519Z] Running command: /bin/bash -lc "sed -n '1465,1535p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r...
+[2026-05-12T21:44:19.520Z] Command completed: /bin/bash -lc "sed -n '1040,1465p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r... (exit 0)
+[2026-05-12T21:44:19.520Z] Command completed: /bin/bash -lc "sed -n '1465,1535p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r... (exit 0)
+[2026-05-12T21:44:24.586Z] Running command: /bin/bash -lc "sed -n '720,840p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T21:44:24.586Z] Command completed: /bin/bash -lc "sed -n '720,840p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T21:44:24.587Z] Running command: /bin/bash -lc "sed -n '840,950p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T21:44:24.588Z] Command completed: /bin/bash -lc "sed -n '840,950p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T21:44:34.608Z] Running command: /bin/bash -lc "rg -n \"NemotronOmniAudioLLMService\\(\" -g '*.py' src tests"
+[2026-05-12T21:44:34.622Z] Running command: /bin/bash -lc 'rg -n "conversation_id|suffix_only_conversation|ConversationCacheMissError|_ex...
+[2026-05-12T21:44:34.622Z] Command completed: /bin/bash -lc "rg -n \"NemotronOmniAudioLLMService\\(\" -g '*.py' src tests" (exit 0)
+[2026-05-12T21:44:34.622Z] Command failed: /bin/bash -lc 'rg -n "conversation_id|suffix_only_conversation|ConversationCacheMissError|_ex... (exit 1)
+[2026-05-12T21:44:45.651Z] Assistant message captured: I’ve finished the first pass of reading. Now I’m pinning exact line numbers around the state-...
+
+[2026-05-12T21:44:45.651Z] Assistant message
+I’ve finished the first pass of reading. Now I’m pinning exact line numbers around the state-machine and cancellation paths and looking for cases where the implementation’s guarantees are weaker than the tests or the plan.
+[2026-05-12T21:44:45.687Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '340,580p'"
+[2026-05-12T21:44:45.707Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '340,580p'" (exit 0)
+[2026-05-12T21:44:45.736Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '930,1335p'"
+[2026-05-12T21:44:45.737Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '930,1335p'" (exit 0)
+[2026-05-12T21:44:45.755Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '1335,1495p'"
+[2026-05-12T21:44:45.756Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '1335,1495p'" (exit 0)
+[2026-05-12T21:44:45.772Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '412,445p'"
+[2026-05-12T21:44:45.772Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '412,445p'" (exit 0)
+[2026-05-12T21:44:45.788Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '780,1320p'"
+[2026-05-12T21:44:45.806Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '780,1320p'" (exit 0)
+[2026-05-12T21:44:50.402Z] Running command: /bin/bash -lc 'rg -n "live context|same object|is context|FunctionCallParams.context|Function...
+[2026-05-12T21:44:50.402Z] Command completed: /bin/bash -lc 'rg -n "live context|same object|is context|FunctionCallParams.context|Function... (exit 0)
+[2026-05-12T21:45:02.481Z] Running command: /bin/bash -lc "rg -n \"async def cancel_task|def cancel_task\" pipecat-core-code/src/pipecat ...
+[2026-05-12T21:45:02.499Z] Command completed: /bin/bash -lc "rg -n \"async def cancel_task|def cancel_task\" pipecat-core-code/src/pipecat ... (exit 0)
+[2026-05-12T21:45:07.286Z] Running command: /bin/bash -lc "sed -n '120,170p' pipecat-core-code/src/pipecat/utils/base_object.py"
+[2026-05-12T21:45:07.287Z] Command completed: /bin/bash -lc "sed -n '120,170p' pipecat-core-code/src/pipecat/utils/base_object.py" (exit 0)
+[2026-05-12T21:45:09.806Z] Running command: /bin/bash -lc "sed -n '74,125p' pipecat-core-code/src/pipecat/utils/asyncio/task_manager.py"
+[2026-05-12T21:45:09.807Z] Command completed: /bin/bash -lc "sed -n '74,125p' pipecat-core-code/src/pipecat/utils/asyncio/task_manager.py" (exit 0)
+[2026-05-12T21:45:12.391Z] Running command: /bin/bash -lc "sed -n '180,255p' pipecat-core-code/src/pipecat/utils/asyncio/task_manager.py"
+[2026-05-12T21:45:12.391Z] Command completed: /bin/bash -lc "sed -n '180,255p' pipecat-core-code/src/pipecat/utils/asyncio/task_manager.py" (exit 0)
+[2026-05-12T21:45:24.269Z] Running command: /bin/bash -lc "sed -n '330,390p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T21:45:24.269Z] Command completed: /bin/bash -lc "sed -n '330,390p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T21:45:26.825Z] Running command: /bin/bash -lc "sed -n '480,535p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T21:45:26.825Z] Command completed: /bin/bash -lc "sed -n '480,535p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T21:46:15.938Z] Assistant message captured: I found one race candidate worth validating directly: the new-turn supersession path pops the...
+
+[2026-05-12T21:46:15.938Z] Assistant message
+I found one race candidate worth validating directly: the new-turn supersession path pops the batch state before it actually cancels the running tool. I’m running a minimal harness to see whether a tool that finishes in that window can still emit a stale `FunctionCallResultFrame` and contaminate per-turn dedup state.
+[2026-05-12T21:46:32.094Z] Running command: /bin/bash -lc "cat <<'PY' >/tmp/repro_supersession_race.py import asyncio, copy, contextlib, ...
+[2026-05-12T21:46:32.095Z] Command failed: /bin/bash -lc "cat <<'PY' >/tmp/repro_supersession_race.py import asyncio, copy, contextlib, ... (exit 127)
+[2026-05-12T21:46:34.927Z] Running command: /bin/bash -lc 'python3 /tmp/repro_supersession_race.py'
+[2026-05-12T21:46:34.927Z] Command failed: /bin/bash -lc 'python3 /tmp/repro_supersession_race.py' (exit 1)
+[2026-05-12T21:46:40.114Z] Running command: /bin/bash -lc 'PYTHONPATH=/home/khkramer/src/nemotron-nano-omni/src:/home/khkramer/src/nemotr...
+[2026-05-12T21:46:40.114Z] Command failed: /bin/bash -lc 'PYTHONPATH=/home/khkramer/src/nemotron-nano-omni/src:/home/khkramer/src/nemotr... (exit 1)
+[2026-05-12T21:47:46.842Z] Running command: /bin/bash -lc "sed -n '950,1105p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T21:47:46.842Z] Command completed: /bin/bash -lc "sed -n '950,1105p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T21:49:04.060Z] Running command: /bin/bash -lc 'rg -n "round limit|duplicate suppression|dedup|round-accounting|per-user-turn ...
+[2026-05-12T21:49:04.060Z] Command completed: /bin/bash -lc 'rg -n "round limit|duplicate suppression|dedup|round-accounting|per-user-turn ... (exit 0)
+[2026-05-12T21:49:07.140Z] Running command: /bin/bash -lc "sed -n '124,140p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-12T21:49:07.140Z] Command completed: /bin/bash -lc "sed -n '124,140p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-12T21:49:39.938Z] Assistant message captured: I found a stronger issue than a generic race: queued-not-started cancellations don’t actually...
+
+[2026-05-12T21:49:39.938Z] Assistant message
+I found a stronger issue than a generic race: queued-not-started cancellations don’t actually terminate those ids in stock Pipecat. The service emits `FunctionCallCancelFrame`s for them, but `LLMAssistantAggregator` only clears cancellations for ids that already have a non-`None` `FunctionCallInProgressFrame`. I’m pinning those lines now.
+[2026-05-12T21:49:39.978Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_response_unive...
+[2026-05-12T21:49:39.978Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_response_unive... (exit 0)
+[2026-05-12T21:49:39.985Z] Running command: /bin/bash -lc 'rg -n "_function_calls_in_progress|queued-not-started|cancelled" proj-2026-05-...
+[2026-05-12T21:49:39.985Z] Command completed: /bin/bash -lc 'rg -n "_function_calls_in_progress|queued-not-started|cancelled" proj-2026-05-... (exit 0)
+[2026-05-12T21:50:20.098Z] Running command: /bin/bash -lc "sed -n '105,145p' proj-2026-05-11-2008/ISSUE_INVESTIGATION.md"
+[2026-05-12T21:50:20.098Z] Command completed: /bin/bash -lc "sed -n '105,145p' proj-2026-05-11-2008/ISSUE_INVESTIGATION.md" (exit 0)
+[2026-05-12T21:51:44.027Z] Assistant message captured: 1. High — `src/nemotron_voice/services/nvidia/nemotron_omni.py:561-574`, compared with stock ...
+
+[2026-05-12T21:51:44.027Z] Assistant message
+1. High — `src/nemotron_voice/services/nvidia/nemotron_omni.py:561-574`, compared with stock `pipecat-core-code/src/pipecat/processors/aggregators/llm_response_universal.py:1252-1256,1421-1429`. Queued-not-started stale ids are only given `FunctionCallCancelFrame`s, but stock `LLMAssistantAggregator` only clears cancellations when `_function_calls_in_progress[id]` holds a real `FunctionCallInProgressFrame`; the `None` placeholders seeded by `FunctionCallsStartedFrame` are ignored. So the tests at `tests/test_nemotron_omni_aligned.py:805-935` overstate the guarantee: queued superseded ids can remain stuck in Pipecat bookkeeping even though the cancel frames/events were emitted.
+
+2. High — `src/nemotron_voice/services/nvidia/nemotron_omni.py:372-383,472-506,1318-1363,1452-1459`. On newer-user-turn supersession, the code pops the batch state and resets per-turn dedup before it awaits cancellation of the running tool. If that tool finishes in the gap, it can still emit a stale `FunctionCallResultFrame` into the superseding turn and repopulate `_turn_tool_results`; if `_cancel_running_sync_function_calls()` reaches the finished task before the runner drops it, the same `tool_call_id` can then also get a cancel. This is the race where a superseded running call can produce stale result state or two terminal signals.
+
+3. High — `src/nemotron_voice/services/nvidia/nemotron_omni.py:1169-1208,392-396`. `_emit_round_limit_results()` is outside the batch state machine. If an interruption lands mid-broadcast, there is no `_current_batch_id`/`_tool_batch_states` entry to finish or cancel the remaining synthetic ids, so later requested `tool_call_id`s can be orphaned with neither result nor cancel. The happy-path test at `tests/test_nemotron_omni_aligned.py:1015-1081` does not cover this.
+
+4. Medium — `src/nemotron_voice/services/nvidia/nemotron_omni.py:363-385,454-458,934-936`. The frame-time snapshot contract is broken and doubled. `process_frame()` computes the turn key from one deep-copied/normalized snapshot, then the background task later deep-copies and normalizes the live `LLMContext` again. That is the perf hit you called out, and it is also a correctness bug: reset/supersession decisions can be made against an earlier context version than the actual outbound request if shared context mutates between those two points.
+
+5. Medium — `src/nemotron_voice/services/nvidia/nemotron_omni.py:439-458,364-377`. `_current_turn_user_key` is just the serialized latest user message. Two distinct top-level turns with identical user rows are treated as the same turn, so dedup/round state can bleed across turns, and an in-flight sync batch from the first turn will not be superseded/cancelled when the second identical turn arrives.
+
+6. Low — `tests/test_nemotron_omni_aligned.py:1186-1260,1262-1320`. The routing tests do not prove the real bot topology. One calls `ParallelPipeline._parallel_push_frame()` directly; the other hand-wires stub passthrough processors and a dummy assistant instead of the real `NemotronMagpieWebSocketTTSService`/transport path. They are useful smoke tests, but they do not actually guarantee deployed re-entry routing.
+
+Verified correct:
+- `src/nemotron_voice/services/nvidia/nemotron_omni.py:1284-1312` correctly keeps the sequential runner alive when a running sync tool is cancelled; the `CancelledError` is swallowed there and `_function_call_tasks.pop(task, None)` avoids the stock `del`/`KeyError` problem.
+- `src/nemotron_voice/services/nvidia/nemotron_omni.py:1286-1293` correctly prevents a stale queued item from dispatching `_run_function_call()` once its batch is marked stale.
+- `src/nemotron_voice/services/nvidia/nemotron_omni.py:957-960,1160-1165` keeps `FunctionCallFromLLM.context` live; it passes the shared `LLMContext`, not the deep-copied request snapshot.
+- No dangling references to the deleted cache/internal-loop helpers showed up in `src/` or `tests`, and `src/nemotron_voice/bot.py:426-436` matches the new `NemotronOmniAudioLLMService` constructor shape.
+- I do not see a runner/generation deadlock in the intended path: the generation task only enqueues sync tools and returns, while the final tool waits for that task to finish before followup.
+
+Static review only; I did not run the suite because the local Python environment is missing repo deps (`loguru` import failed).
+
+Verdict: fix findings 1-5 first.
+[2026-05-12T21:51:44.064Z] Turn completed.
+
+[2026-05-12T21:51:44.104Z] Final output
+1. High — `src/nemotron_voice/services/nvidia/nemotron_omni.py:561-574`, compared with stock `pipecat-core-code/src/pipecat/processors/aggregators/llm_response_universal.py:1252-1256,1421-1429`. Queued-not-started stale ids are only given `FunctionCallCancelFrame`s, but stock `LLMAssistantAggregator` only clears cancellations when `_function_calls_in_progress[id]` holds a real `FunctionCallInProgressFrame`; the `None` placeholders seeded by `FunctionCallsStartedFrame` are ignored. So the tests at `tests/test_nemotron_omni_aligned.py:805-935` overstate the guarantee: queued superseded ids can remain stuck in Pipecat bookkeeping even though the cancel frames/events were emitted.
+
+2. High — `src/nemotron_voice/services/nvidia/nemotron_omni.py:372-383,472-506,1318-1363,1452-1459`. On newer-user-turn supersession, the code pops the batch state and resets per-turn dedup before it awaits cancellation of the running tool. If that tool finishes in the gap, it can still emit a stale `FunctionCallResultFrame` into the superseding turn and repopulate `_turn_tool_results`; if `_cancel_running_sync_function_calls()` reaches the finished task before the runner drops it, the same `tool_call_id` can then also get a cancel. This is the race where a superseded running call can produce stale result state or two terminal signals.
+
+3. High — `src/nemotron_voice/services/nvidia/nemotron_omni.py:1169-1208,392-396`. `_emit_round_limit_results()` is outside the batch state machine. If an interruption lands mid-broadcast, there is no `_current_batch_id`/`_tool_batch_states` entry to finish or cancel the remaining synthetic ids, so later requested `tool_call_id`s can be orphaned with neither result nor cancel. The happy-path test at `tests/test_nemotron_omni_aligned.py:1015-1081` does not cover this.
+
+4. Medium — `src/nemotron_voice/services/nvidia/nemotron_omni.py:363-385,454-458,934-936`. The frame-time snapshot contract is broken and doubled. `process_frame()` computes the turn key from one deep-copied/normalized snapshot, then the background task later deep-copies and normalizes the live `LLMContext` again. That is the perf hit you called out, and it is also a correctness bug: reset/supersession decisions can be made against an earlier context version than the actual outbound request if shared context mutates between those two points.
+
+5. Medium — `src/nemotron_voice/services/nvidia/nemotron_omni.py:439-458,364-377`. `_current_turn_user_key` is just the serialized latest user message. Two distinct top-level turns with identical user rows are treated as the same turn, so dedup/round state can bleed across turns, and an in-flight sync batch from the first turn will not be superseded/cancelled when the second identical turn arrives.
+
+6. Low — `tests/test_nemotron_omni_aligned.py:1186-1260,1262-1320`. The routing tests do not prove the real bot topology. One calls `ParallelPipeline._parallel_push_frame()` directly; the other hand-wires stub passthrough processors and a dummy assistant instead of the real `NemotronMagpieWebSocketTTSService`/transport path. They are useful smoke tests, but they do not actually guarantee deployed re-entry routing.
+
+Verified correct:
+- `src/nemotron_voice/services/nvidia/nemotron_omni.py:1284-1312` correctly keeps the sequential runner alive when a running sync tool is cancelled; the `CancelledError` is swallowed there and `_function_call_tasks.pop(task, None)` avoids the stock `del`/`KeyError` problem.
+- `src/nemotron_voice/services/nvidia/nemotron_omni.py:1286-1293` correctly prevents a stale queued item from dispatching `_run_function_call()` once its batch is marked stale.
+- `src/nemotron_voice/services/nvidia/nemotron_omni.py:957-960,1160-1165` keeps `FunctionCallFromLLM.context` live; it passes the shared `LLMContext`, not the deep-copied request snapshot.
+- No dangling references to the deleted cache/internal-loop helpers showed up in `src/` or `tests`, and `src/nemotron_voice/bot.py:426-436` matches the new `NemotronOmniAudioLLMService` constructor shape.
+- I do not see a runner/generation deadlock in the intended path: the generation task only enqueues sync tools and returns, while the final tool waits for that task to finish before followup.
+
+Static review only; I did not run the suite because the local Python environment is missing repo deps (`loguru` import failed).
+
+Verdict: fix findings 1-5 first.
