@@ -44,7 +44,11 @@ from pipecat.frames.frames import (
     StartFrame,
 )
 from pipecat.metrics.metrics import LLMTokenUsage
-from pipecat.processors.aggregators.llm_context import LLMContext, LLMSpecificMessage
+from pipecat.processors.aggregators.llm_context import (
+    LLMContext,
+    LLMSpecificMessage,
+    is_given as context_is_given,
+)
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
@@ -155,6 +159,16 @@ class ChatCompletionPassResult:
 
 class ConversationCacheMissError(RuntimeError):
     pass
+
+
+@dataclass
+class NormalizedRequestSnapshot:
+    context: LLMContext
+    universal_messages: list[Any]
+    messages: list[dict[str, Any]]
+    tools: list[dict[str, Any]] | None
+    tool_choice: Any | None
+    cache_shape_fingerprint: str
 
 
 @dataclass
@@ -273,6 +287,7 @@ class NemotronOmniAudioLLMService(LLMService):
         self._conversation_cache_committed = False
         self._canonical_messages: list[dict[str, Any]] = []
         self._context_lineage_messages: list[dict[str, Any]] = []
+        self._context_lineage_cache_shape_fingerprint: str | None = None
         trace_dir = os.getenv("NEMOTRON_OMNI_TRACE_DIR")
         self._trace_dir = Path(trace_dir) if trace_dir else None
         self._trace_redact_audio = os.getenv("NEMOTRON_OMNI_TRACE_REDACT_AUDIO", "1") != "0"
@@ -324,8 +339,10 @@ class NemotronOmniAudioLLMService(LLMService):
         """Process audio, VAD, lifecycle, and pass-through frames."""
         await super().process_frame(frame, direction)
 
+        # LLMService.process_frame handles interruptions and settings updates,
+        # but it does not forward arbitrary frames for us.
         if isinstance(frame, LLMContextFrame):
-            await self._handle_context_frame(frame.context)
+            await self._handle_context_frame(copy.deepcopy(frame.context))
         elif isinstance(frame, InputAudioRawFrame):
             if self._audio_passthrough:
                 await self.push_frame(frame, direction)
@@ -338,31 +355,37 @@ class NemotronOmniAudioLLMService(LLMService):
             await self.push_frame(frame, direction)
 
     async def _handle_context_frame(self, context: LLMContext):
-        messages = copy.deepcopy(context.get_messages(llm_specific_filter=self.__class__.__name__))
-        if not messages:
-            logger.debug(f"{self}: ignoring empty LLM context")
-            return
-
-        canonical_messages = self._canonical_messages_from_context(messages)
-        if canonical_messages is None:
-            logger.debug(f"{self}: ignoring LLM context without a latest user message")
-            return
-        self._context_lineage_messages = copy.deepcopy(canonical_messages)
-
         await self._cancel_generation_task()
-        payload, full_messages = self._build_payload_from_messages(canonical_messages)
         self._generation_task = self.create_task(
-            self._run_completion_payload(
-                payload,
-                full_messages=full_messages,
-                request_description=(
-                    f"context with {len(payload['messages'])} messages and "
-                    f"{self._count_audio_parts(payload['messages'])} audio parts"
-                ),
-                start_ttfb=True,
-            ),
+            self._run_context_generation_task(context),
             name="nemotron_omni_context_completion",
         )
+
+    async def _run_context_generation_task(self, context: LLMContext) -> None:
+        try:
+            await self.push_frame(LLMFullResponseStartFrame())
+            await self.start_processing_metrics()
+            await self._process_context(context)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error(f"{self}: completion failed: {exc}")
+            await self.push_frame(ErrorFrame(error=str(exc)))
+        finally:
+            await self._finalize_generation_task()
+            if self._generation_task is asyncio.current_task():
+                self._generation_task = None
+
+    async def _finalize_generation_task(self) -> None:
+        try:
+            await asyncio.shield(self.stop_processing_metrics())
+        except Exception as exc:
+            logger.warning(f"{self}: failed stopping processing metrics: {exc}")
+
+        try:
+            await asyncio.shield(self.push_frame(LLMFullResponseEndFrame()))
+        except Exception as exc:
+            logger.warning(f"{self}: failed pushing LLMFullResponseEndFrame: {exc}")
 
     async def _cancel_generation_task(self):
         if self._generation_task:
@@ -374,11 +397,122 @@ class NemotronOmniAudioLLMService(LLMService):
             await self._session.close()
             self._session = None
 
-    def _build_payload_from_messages(
+    def _messages_for_adapter_boundary(
         self,
-        messages: list[dict[str, Any]],
-    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-        full_messages = copy.deepcopy(messages)
+        context: LLMContext,
+    ) -> list[Any]:
+        adapter_llm = self.get_llm_adapter().id_for_llm_specific_messages
+        filtered_messages: list[Any] = []
+        for message in context.get_messages():
+            if isinstance(message, LLMSpecificMessage) and message.llm != adapter_llm:
+                continue
+            filtered_messages.append(copy.deepcopy(message))
+        return filtered_messages
+
+    def _provider_messages_from_universal_messages(
+        self,
+        messages: list[Any],
+    ) -> list[dict[str, Any]]:
+        provider_messages: list[dict[str, Any]] = []
+        for message in messages:
+            if isinstance(message, LLMSpecificMessage):
+                candidate = copy.deepcopy(message.message)
+            else:
+                candidate = copy.deepcopy(message)
+
+            if isinstance(candidate, dict) and candidate.get("role") == "developer":
+                candidate["role"] = "user"
+
+            converted = self._convert_context_message(candidate)
+            if converted is not None:
+                provider_messages.append(converted)
+        return provider_messages
+
+    def _provider_tools_from_context(
+        self,
+        context: LLMContext,
+    ) -> list[dict[str, Any]] | None:
+        provider_tools = self.get_llm_adapter().from_standard_tools(context.tools)
+        if not context_is_given(provider_tools) or not provider_tools:
+            return None
+        return copy.deepcopy(provider_tools)
+
+    def _provider_tool_choice_from_context(
+        self,
+        context: LLMContext,
+        *,
+        provider_tools: list[dict[str, Any]] | None,
+    ) -> Any | None:
+        if not provider_tools or not context_is_given(context.tool_choice):
+            return None
+        return copy.deepcopy(context.tool_choice)
+
+    def _cache_shape_fingerprint(
+        self,
+        *,
+        provider_tools: list[dict[str, Any]] | None,
+        provider_tool_choice: Any | None,
+    ) -> str:
+        prompt_shape: dict[str, Any] = {}
+        if provider_tools is not None:
+            prompt_shape["tools"] = copy.deepcopy(provider_tools)
+        if provider_tool_choice is not None:
+            prompt_shape["tool_choice"] = copy.deepcopy(provider_tool_choice)
+        if self._settings.chat_template_kwargs:
+            prompt_shape["chat_template_kwargs"] = copy.deepcopy(
+                self._settings.chat_template_kwargs
+            )
+        if self._settings.extra:
+            prompt_shape["extra"] = copy.deepcopy(self._settings.extra)
+        return json.dumps(prompt_shape, ensure_ascii=True, sort_keys=True, separators=(",", ":"))
+
+    def _normalized_request_snapshot(
+        self,
+        context: LLMContext,
+    ) -> NormalizedRequestSnapshot | None:
+        universal_messages = self._messages_for_adapter_boundary(context)
+        if not universal_messages:
+            logger.debug(f"{self}: ignoring empty LLM context")
+            return None
+
+        provider_messages = self._provider_messages_from_universal_messages(universal_messages)
+        if not provider_messages:
+            logger.debug(f"{self}: ignoring LLM context without provider-visible messages")
+            return None
+
+        provider_tools = self._provider_tools_from_context(context)
+        provider_tool_choice = self._provider_tool_choice_from_context(
+            context,
+            provider_tools=provider_tools,
+        )
+        return NormalizedRequestSnapshot(
+            context=context,
+            universal_messages=universal_messages,
+            messages=provider_messages,
+            tools=provider_tools,
+            tool_choice=provider_tool_choice,
+            cache_shape_fingerprint=self._cache_shape_fingerprint(
+                provider_tools=provider_tools,
+                provider_tool_choice=provider_tool_choice,
+            ),
+        )
+
+    def _build_payload(
+        self,
+        snapshot: NormalizedRequestSnapshot,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
+        canonical_messages = self._canonical_messages_from_context(
+            snapshot.messages,
+            cache_shape_fingerprint=snapshot.cache_shape_fingerprint,
+        )
+        if canonical_messages is None:
+            logger.debug(f"{self}: ignoring LLM context without a latest user message")
+            return None
+
+        self._context_lineage_messages = copy.deepcopy(canonical_messages)
+        self._context_lineage_cache_shape_fingerprint = snapshot.cache_shape_fingerprint
+
+        full_messages = copy.deepcopy(canonical_messages)
         if self._strip_historical_audio_from_payload:
             full_messages = self._strip_historical_audio_from_messages(full_messages)
         payload_messages, requires_cache = self._conversation_payload_messages(full_messages)
@@ -387,12 +521,14 @@ class NemotronOmniAudioLLMService(LLMService):
             "messages": payload_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
+            "_cache_shape_fingerprint": snapshot.cache_shape_fingerprint,
         }
         if requires_cache:
             payload["conversation_require_cache"] = True
-        if self._enable_bash_tool:
-            payload["tools"] = [BASH_TOOL_DEFINITION]
-            payload["tool_choice"] = "auto"
+        if snapshot.tools is not None:
+            payload["tools"] = copy.deepcopy(snapshot.tools)
+            if snapshot.tool_choice is not None:
+                payload["tool_choice"] = copy.deepcopy(snapshot.tool_choice)
 
         if self._settings.max_tokens is not None:
             payload["max_tokens"] = self._settings.max_tokens
@@ -503,11 +639,6 @@ class NemotronOmniAudioLLMService(LLMService):
             return None
 
         role = message.get("role")
-        if role == "developer":
-            # vLLM's chat-completions path is OpenAI-compatible but the local
-            # template support is model-dependent. Treat developer context as a
-            # system instruction for broad compatibility.
-            role = "system"
         if role not in {"system", "user", "assistant", "tool"}:
             logger.debug(f"{self}: skipping context message with unsupported role {role!r}")
             return None
@@ -592,15 +723,11 @@ class NemotronOmniAudioLLMService(LLMService):
 
     def _canonical_messages_from_context(
         self,
-        context_messages: list[Any],
+        context_messages: list[dict[str, Any]],
+        *,
+        cache_shape_fingerprint: str,
     ) -> list[dict[str, Any]] | None:
-        converted_messages: list[dict[str, Any]] = []
-        for message in context_messages:
-            converted = self._convert_context_message(message)
-            if converted is not None:
-                converted_messages.append(converted)
-
-        canonical_messages = self._with_system_message(converted_messages)
+        canonical_messages = self._with_system_message(context_messages)
         if (
             not canonical_messages
             or canonical_messages[-1].get("role") != "user"
@@ -608,17 +735,27 @@ class NemotronOmniAudioLLMService(LLMService):
         ):
             return None
 
-        if not self._context_messages_extend_observed_lineage(canonical_messages):
-            self._rotate_conversation_cache_lineage(canonical_messages)
+        if not self._context_messages_extend_observed_lineage(
+            canonical_messages,
+            cache_shape_fingerprint=cache_shape_fingerprint,
+        ):
+            self._rotate_conversation_cache_lineage(
+                canonical_messages,
+                cache_shape_fingerprint=cache_shape_fingerprint,
+            )
         return canonical_messages
 
     def _context_messages_extend_observed_lineage(
         self,
         observed_messages: list[dict[str, Any]],
+        *,
+        cache_shape_fingerprint: str,
     ) -> bool:
         lineage_count = len(self._context_lineage_messages)
         if lineage_count == 0:
             return True
+        if self._context_lineage_cache_shape_fingerprint != cache_shape_fingerprint:
+            return False
         if len(observed_messages) < lineage_count:
             return False
         return observed_messages[:lineage_count] == self._context_lineage_messages
@@ -626,6 +763,8 @@ class NemotronOmniAudioLLMService(LLMService):
     def _rotate_conversation_cache_lineage(
         self,
         observed_messages: list[dict[str, Any]],
+        *,
+        cache_shape_fingerprint: str,
     ) -> None:
         old_conversation_id = self._conversation_id
         if self._conversation_id:
@@ -641,11 +780,14 @@ class NemotronOmniAudioLLMService(LLMService):
             )
         logger.debug(
             f"{self}: committed roles={self._message_role_summary(self._context_lineage_messages)} "
-            f"observed roles={self._message_role_summary(observed_messages)}"
+            f"observed roles={self._message_role_summary(observed_messages)} "
+            f"committed_cache_shape={self._context_lineage_cache_shape_fingerprint!r} "
+            f"observed_cache_shape={cache_shape_fingerprint!r}"
         )
         self._conversation_cache_committed = False
         self._canonical_messages = []
         self._context_lineage_messages = []
+        self._context_lineage_cache_shape_fingerprint = None
 
     def _commit_canonical_messages(
         self,
@@ -740,6 +882,27 @@ class NemotronOmniAudioLLMService(LLMService):
         except Exception as exc:
             logger.warning(f"{self}: failed to write trace file for {trace_id}: {exc}")
 
+    async def _process_context(self, context: LLMContext):
+        snapshot_context = copy.deepcopy(context)
+        snapshot = self._normalized_request_snapshot(snapshot_context)
+        if snapshot is None:
+            return
+
+        payload_info = self._build_payload(snapshot)
+        if payload_info is None:
+            return
+
+        payload, full_messages = payload_info
+        await self._run_completion_payload(
+            payload,
+            full_messages=full_messages,
+            request_description=(
+                f"context with {len(payload['messages'])} messages and "
+                f"{self._count_audio_parts(payload['messages'])} audio parts"
+            ),
+            start_ttfb=True,
+        )
+
     async def _run_completion_payload(
         self,
         payload: dict[str, Any],
@@ -760,8 +923,6 @@ class NemotronOmniAudioLLMService(LLMService):
         top_level_request_seq = self._top_level_request_seq
 
         try:
-            await self.push_frame(LLMFullResponseStartFrame())
-            await self.start_processing_metrics()
             if start_ttfb:
                 await self.start_ttfb_metrics()
 
@@ -896,10 +1057,6 @@ class NemotronOmniAudioLLMService(LLMService):
         finally:
             if not completed and self._conversation_id:
                 logger.debug(f"{self}: conversation cache commit unchanged after failed request")
-            await self.stop_processing_metrics()
-            await self.push_frame(LLMFullResponseEndFrame())
-            if self._generation_task is asyncio.current_task():
-                self._generation_task = None
 
     async def _stream_completion_pass(
         self,
@@ -1358,7 +1515,7 @@ class NemotronOmniAudioLLMService(LLMService):
                     "result": result,
                 }
             )
-        return result
+            return result
 
         stdout, stderr, timed_out = await self._communicate_bash_process(process)
 
@@ -1379,9 +1536,9 @@ class NemotronOmniAudioLLMService(LLMService):
                 "tool_call_id": tool_call_id,
                 "code": code,
                 "cwd": self._bash_tool_cwd,
-                    "result": result,
-                }
-            )
+                "result": result,
+            }
+        )
         return result
 
     async def _communicate_bash_process(

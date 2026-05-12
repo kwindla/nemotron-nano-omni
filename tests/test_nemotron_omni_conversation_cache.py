@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from pipecat.frames.frames import TranscriptionFrame
-from pipecat.processors.aggregators.llm_context import LLMContext
+from pipecat.processors.aggregators.llm_context import LLMContext, LLMSpecificMessage
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -43,6 +43,10 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         service._push_llm_text = noop  # type: ignore[method-assign]
         service._session = object()
         return service
+
+    @staticmethod
+    def _shape_fingerprint() -> str:
+        return "shape-fingerprint"
 
     def test_payload_after_tool_calls_uses_tool_suffix_with_conversation_cache(self) -> None:
         service = self._make_service()
@@ -161,6 +165,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
 
     def test_canonical_messages_from_context_keeps_conversation_id_for_append_only(self) -> None:
         service = self._make_service()
+        fingerprint = self._shape_fingerprint()
         prior_context_messages = service._with_system_message(
             [
                 {"role": "user", "content": "Hello"},
@@ -169,6 +174,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         )
         service._canonical_messages = copy.deepcopy(prior_context_messages)
         service._context_lineage_messages = copy.deepcopy(prior_context_messages)
+        service._context_lineage_cache_shape_fingerprint = fingerprint
         service._conversation_cache_committed = True
         original_conversation_id = service._conversation_id
 
@@ -177,7 +183,8 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "world"},
                 {"role": "user", "content": "Next question"},
-            ]
+            ],
+            cache_shape_fingerprint=fingerprint,
         )
 
         self.assertIsNotNone(canonical_messages)
@@ -232,6 +239,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
 
     def test_canonical_messages_from_context_rotates_conversation_id_on_non_append_change(self) -> None:
         service = self._make_service()
+        fingerprint = self._shape_fingerprint()
         prior_context_messages = service._with_system_message(
             [
                 {"role": "user", "content": "Hello"},
@@ -240,6 +248,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         )
         service._canonical_messages = copy.deepcopy(prior_context_messages)
         service._context_lineage_messages = copy.deepcopy(prior_context_messages)
+        service._context_lineage_cache_shape_fingerprint = fingerprint
         service._conversation_cache_committed = True
         original_conversation_id = service._conversation_id
 
@@ -248,7 +257,8 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "user", "content": "Hello"},
                 {"role": "assistant", "content": "WORLD"},
                 {"role": "user", "content": "Next question"},
-            ]
+            ],
+            cache_shape_fingerprint=fingerprint,
         )
 
         self.assertIsNotNone(canonical_messages)
@@ -269,6 +279,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
 
     def test_context_lineage_ignores_internal_assistant_history_gaps(self) -> None:
         service = self._make_service()
+        fingerprint = self._shape_fingerprint()
         service._canonical_messages = service._with_system_message(
             [
                 {
@@ -292,6 +303,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
                 }
             ]
         )
+        service._context_lineage_cache_shape_fingerprint = fingerprint
         service._conversation_cache_committed = True
         original_conversation_id = service._conversation_id
 
@@ -308,7 +320,8 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
                     "role": "user",
                     "content": "What creature did I mention? One word only.",
                 },
-            ]
+            ],
+            cache_shape_fingerprint=fingerprint,
         )
 
         self.assertIsNotNone(canonical_messages)
@@ -331,6 +344,55 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
                     },
                 ]
             ),
+        )
+
+    def test_messages_for_adapter_boundary_uses_openai_llm_specific_id(self) -> None:
+        service = self._make_service()
+        context = LLMContext(
+            messages=[
+                {"role": "user", "content": "Hello"},
+                LLMSpecificMessage(
+                    llm="openai",
+                    message={"role": "assistant", "content": "Keep this provider row."},
+                ),
+                LLMSpecificMessage(
+                    llm="NemotronOmniAudioLLMService",
+                    message={"role": "assistant", "content": "Drop this legacy provider row."},
+                ),
+            ]
+        )
+
+        filtered_messages = service._messages_for_adapter_boundary(context)
+
+        self.assertEqual(
+            filtered_messages,
+            [
+                {"role": "user", "content": "Hello"},
+                LLMSpecificMessage(
+                    llm="openai",
+                    message={"role": "assistant", "content": "Keep this provider row."},
+                ),
+            ],
+        )
+
+    def test_provider_messages_downgrade_developer_to_user_before_conversion(self) -> None:
+        service = self._make_service()
+        provider_messages = service._provider_messages_from_universal_messages(
+            [
+                LLMSpecificMessage(
+                    llm="openai",
+                    message={"role": "developer", "content": "Developer note."},
+                ),
+                {"role": "user", "content": "Question"},
+            ]
+        )
+
+        self.assertEqual(
+            provider_messages,
+            [
+                {"role": "user", "content": "Developer note."},
+                {"role": "user", "content": "Question"},
+            ],
         )
 
     async def test_execute_tool_calls_includes_tool_name(self) -> None:
