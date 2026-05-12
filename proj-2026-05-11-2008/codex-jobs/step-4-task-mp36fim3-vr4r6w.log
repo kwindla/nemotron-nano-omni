@@ -1,0 +1,308 @@
+[2026-05-12T22:02:48.703Z] Starting Codex Task.
+[2026-05-12T22:02:51.139Z] Starting Codex task thread.
+[2026-05-12T22:02:52.135Z] Thread ready (019e1e36-db3b-7913-b34c-cc37a9fc08bc).
+[2026-05-12T22:02:52.163Z] Turn started (019e1e36-db7b-7c12-a44c-478218091244).
+[2026-05-12T22:03:09.853Z] Assistant message captured: Reading the step-4 plan text and the current Nemotron/Pipecat implementation first. Then I’ll...
+
+[2026-05-12T22:03:09.863Z] Assistant message
+Reading the step-4 plan text and the current Nemotron/Pipecat implementation first. Then I’ll map the exact sync-tool context path against the stock assistant aggregator so the changes stay narrowly scoped.
+[2026-05-12T22:03:09.900Z] Running command: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/ISSUE_INVESTIGATION.md"
+[2026-05-12T22:03:09.919Z] Command completed: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/ISSUE_INVESTIGATION.md" (exit 0)
+[2026-05-12T22:03:09.919Z] Running command: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-12T22:03:09.920Z] Command completed: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-12T22:03:09.920Z] Running command: /bin/bash -lc "sed -n '1,420p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:03:09.920Z] Command completed: /bin/bash -lc "sed -n '1,420p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:03:09.921Z] Running command: /bin/bash -lc "sed -n '1,280p' src/nemotron_voice/bot.py"
+[2026-05-12T22:03:09.921Z] Command completed: /bin/bash -lc "sed -n '1,280p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-12T22:03:09.922Z] Running command: /bin/bash -lc "sed -n '1,420p' pipecat-core-code/src/pipecat/processors/aggregators/llm_respo...
+[2026-05-12T22:03:09.922Z] Command completed: /bin/bash -lc "sed -n '1,420p' pipecat-core-code/src/pipecat/processors/aggregators/llm_respo... (exit 0)
+[2026-05-12T22:03:09.933Z] Running command: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/processors/aggregators/llm_conte...
+[2026-05-12T22:03:09.934Z] Command completed: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/processors/aggregators/llm_conte... (exit 0)
+[2026-05-12T22:03:09.947Z] Running command: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/frames/frames.py"
+[2026-05-12T22:03:09.947Z] Command completed: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/frames/frames.py" (exit 0)
+[2026-05-12T22:03:09.972Z] Running command: /bin/bash -lc "sed -n '1,420p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T22:03:09.987Z] Command completed: /bin/bash -lc "sed -n '1,420p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T22:03:09.987Z] Running command: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_conversation_cache.py"
+[2026-05-12T22:03:09.987Z] Command completed: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_conversation_cache.py" (exit 0)
+[2026-05-12T22:03:26.741Z] Assistant message captured: The next pass is narrower: I’m pulling the exact step-4 section, the stock assistant-aggregat...
+
+[2026-05-12T22:03:26.741Z] Assistant message
+The next pass is narrower: I’m pulling the exact step-4 section, the stock assistant-aggregator methods I need to override, and the current service/tool-loop points where the exact assistant frame has to be injected. After that I’ll wire the subclass and update the aligned tests to exercise the real frame flow.
+[2026-05-12T22:03:26.793Z] Running command: /bin/bash -lc "rg -n \"\\*\\*4\\.|Step 4|NemotronAssistantAggregator|InterruptedToolPassSigna...
+[2026-05-12T22:03:26.794Z] Command completed: /bin/bash -lc "rg -n \"\\*\\*4\\.|Step 4|NemotronAssistantAggregator|InterruptedToolPassSigna... (exit 0)
+[2026-05-12T22:03:26.798Z] Running command: /bin/bash -lc 'rg -n "class LLMAssistantAggregator|def _handle_function_calls_started|def _ha...
+[2026-05-12T22:03:26.818Z] Command completed: /bin/bash -lc 'rg -n "class LLMAssistantAggregator|def _handle_function_calls_started|def _ha... (exit 0)
+[2026-05-12T22:03:26.818Z] Running command: /bin/bash -lc "sed -n '220,360p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-12T22:03:26.818Z] Command completed: /bin/bash -lc "sed -n '220,360p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-12T22:03:26.819Z] Running command: /bin/bash -lc "sed -n '360,780p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:03:26.819Z] Command completed: /bin/bash -lc "sed -n '360,780p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:03:26.819Z] Running command: /bin/bash -lc "sed -n '280,620p' src/nemotron_voice/bot.py"
+[2026-05-12T22:03:26.819Z] Command completed: /bin/bash -lc "sed -n '280,620p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-12T22:03:26.829Z] Running command: /bin/bash -lc "sed -n '1180,1525p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r...
+[2026-05-12T22:03:26.830Z] Command completed: /bin/bash -lc "sed -n '1180,1525p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r... (exit 0)
+[2026-05-12T22:03:26.842Z] Running command: /bin/bash -lc "sed -n '420,999p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T22:03:26.861Z] Command completed: /bin/bash -lc "sed -n '420,999p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T22:03:34.937Z] Running command: /bin/bash -lc "sed -n '920,1365p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:03:34.956Z] Command completed: /bin/bash -lc "sed -n '920,1365p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:03:34.963Z] Running command: /bin/bash -lc "sed -n '1520,1635p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r...
+[2026-05-12T22:03:34.963Z] Command completed: /bin/bash -lc "sed -n '1520,1635p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r... (exit 0)
+[2026-05-12T22:03:34.969Z] Running command: /bin/bash -lc "sed -n '1000,1098p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r...
+[2026-05-12T22:03:34.970Z] Command completed: /bin/bash -lc "sed -n '1000,1098p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r... (exit 0)
+[2026-05-12T22:03:34.974Z] Running command: /bin/bash -lc "sed -n '980,1500p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T22:03:34.993Z] Command completed: /bin/bash -lc "sed -n '980,1500p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T22:03:37.766Z] Assistant message captured: I have the moving parts now. I’m reading the exact step-4 bullets one more time in isolation ...
+
+[2026-05-12T22:03:37.766Z] Assistant message
+I have the moving parts now. I’m reading the exact step-4 bullets one more time in isolation before editing so the subclass and provisional-row bookkeeping match the plan wording, not an approximation.
+[2026-05-12T22:03:39.152Z] Running command: /bin/bash -lc "sed -n '160,186p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-12T22:03:39.171Z] Command completed: /bin/bash -lc "sed -n '160,186p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-12T22:03:42.410Z] Running command: /bin/bash -lc "sed -n '186,206p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-12T22:03:42.410Z] Command completed: /bin/bash -lc "sed -n '186,206p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-12T22:03:46.299Z] Running command: /bin/bash -lc "sed -n '1120,1498p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r...
+[2026-05-12T22:03:46.299Z] Command completed: /bin/bash -lc "sed -n '1120,1498p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r... (exit 0)
+[2026-05-12T22:03:49.814Z] Running command: /bin/bash -lc "sed -n '1098,1130p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r...
+[2026-05-12T22:03:49.814Z] Command completed: /bin/bash -lc "sed -n '1098,1130p' pipecat-core-code/src/pipecat/processors/aggregators/llm_r... (exit 0)
+[2026-05-12T22:03:53.095Z] Running command: /bin/bash -lc 'rg -n "def transform_messages|def add_message|def set_messages" pipecat-core-c...
+[2026-05-12T22:03:53.095Z] Command completed: /bin/bash -lc 'rg -n "def transform_messages|def add_message|def set_messages" pipecat-core-c... (exit 0)
+[2026-05-12T22:03:55.934Z] Running command: /bin/bash -lc "sed -n '360,420p' pipecat-core-code/src/pipecat/processors/aggregators/llm_con...
+[2026-05-12T22:03:55.934Z] Command completed: /bin/bash -lc "sed -n '360,420p' pipecat-core-code/src/pipecat/processors/aggregators/llm_con... (exit 0)
+[2026-05-12T22:04:01.176Z] Running command: /bin/bash -lc 'rg -n "params.context|register_function|result_callback|on_assistant_turn_stop...
+[2026-05-12T22:04:01.191Z] Command completed: /bin/bash -lc 'rg -n "params.context|register_function|result_callback|on_assistant_turn_stop... (exit 0)
+[2026-05-12T22:07:26.056Z] Running command: /bin/bash -lc 'rg -n "class FunctionCallInProgressFrame|class FunctionCallResultFrame|class F...
+[2026-05-12T22:07:26.076Z] Command completed: /bin/bash -lc 'rg -n "class FunctionCallInProgressFrame|class FunctionCallResultFrame|class F... (exit 0)
+[2026-05-12T22:07:30.042Z] Running command: /bin/bash -lc "sed -n '470,520p' pipecat-core-code/src/pipecat/frames/frames.py && sed -n '70...
+[2026-05-12T22:07:30.042Z] Command completed: /bin/bash -lc "sed -n '470,520p' pipecat-core-code/src/pipecat/frames/frames.py && sed -n '70... (exit 0)
+[2026-05-12T22:07:44.812Z] Running command: /bin/bash -lc "sed -n '620,760p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:07:44.812Z] Command completed: /bin/bash -lc "sed -n '620,760p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:07:48.195Z] Running command: /bin/bash -lc "sed -n '760,920p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:07:48.195Z] Command completed: /bin/bash -lc "sed -n '760,920p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:10:17.397Z] Running command: /bin/bash -lc 'rg -n "time_now_iso8601" -n src/nemotron_voice/services/nvidia/nemotron_omni.p...
+[2026-05-12T22:10:17.397Z] Command completed: /bin/bash -lc 'rg -n "time_now_iso8601" -n src/nemotron_voice/services/nvidia/nemotron_omni.p... (exit 0)
+[2026-05-12T22:10:55.634Z] Assistant message captured: Plan: 1. Add the exact-assistant frame, interrupted-pass signal, and a narrow `NemotronAssist...
+
+[2026-05-12T22:10:55.634Z] Assistant message
+Plan:
+1. Add the exact-assistant frame, interrupted-pass signal, and a narrow `NemotronAssistantAggregator` in `nemotron_omni.py`, plus the service-side frame emission points in `_process_context` and `_emit_round_limit_results`.
+2. Wire `bot.py` to use the Nemotron aggregator only when bash tooling is enabled, keeping the stock assistant aggregator otherwise.
+3. Rework the aligned tests so tool-path cases use the real Nemotron aggregator, then add the new exactness/interruption cases and keep the text-only stock-behavior assertions.
+4. Run the targeted pytest pair and the smoke import, fix anything that breaks, then report the exact detection/provisional-row behavior.
+[2026-05-12T22:13:33.686Z] Running command: /bin/bash -lc 'rg -n "def register_function" pipecat-core-code/src/pipecat/services/llm_servi...
+[2026-05-12T22:13:33.687Z] Command completed: /bin/bash -lc 'rg -n "def register_function" pipecat-core-code/src/pipecat/services/llm_servi... (exit 0)
+[2026-05-12T22:13:36.630Z] Running command: /bin/bash -lc "sed -n '633,690p' pipecat-core-code/src/pipecat/services/llm_service.py"
+[2026-05-12T22:13:36.630Z] Command completed: /bin/bash -lc "sed -n '633,690p' pipecat-core-code/src/pipecat/services/llm_service.py" (exit 0)
+[2026-05-12T22:14:31.927Z] Assistant message captured: Adding the exact frame, signal, and aggregator now. This is the core behavior change: the ser...
+
+[2026-05-12T22:14:31.927Z] Assistant message
+Adding the exact frame, signal, and aggregator now. This is the core behavior change: the service will emit the provider-visible assistant/tool pass shape, and the assistant aggregator will take over only the sync-tool context mutation path while leaving the stock text-only path alone.
+[2026-05-12T22:15:17.708Z] Applying 1 file change(s).
+[2026-05-12T22:15:17.725Z] File changes completed.
+[2026-05-12T22:15:29.881Z] Applying 1 file change(s).
+[2026-05-12T22:15:29.883Z] File changes completed.
+[2026-05-12T22:15:33.141Z] Assistant message captured: Wiring the bot next. This stays minimal: when bash tooling is enabled the pipeline gets the N...
+
+[2026-05-12T22:15:33.141Z] Assistant message
+Wiring the bot next. This stays minimal: when bash tooling is enabled the pipeline gets the Nemotron assistant aggregator plus the shared interruption signal; when tooling is off it keeps the stock assistant aggregator exactly as before.
+[2026-05-12T22:15:40.757Z] Applying 1 file change(s).
+[2026-05-12T22:15:40.757Z] File changes completed.
+[2026-05-12T22:15:45.045Z] Assistant message captured: I’m moving the aligned test harness onto the real Nemotron assistant aggregator now. That let...
+
+[2026-05-12T22:15:45.045Z] Assistant message
+I’m moving the aligned test harness onto the real Nemotron assistant aggregator now. That lets the tool-path tests exercise the same downstream context mutation logic the pipeline will actually use, while keeping an escape hatch for stock-only text assertions.
+[2026-05-12T22:15:51.525Z] Applying 1 file change(s).
+[2026-05-12T22:15:51.526Z] File changes completed.
+[2026-05-12T22:15:59.014Z] Assistant message captured: The code path is in place. I’m running the targeted suites now to surface the first breakages...
+
+[2026-05-12T22:15:59.014Z] Assistant message
+The code path is in place. I’m running the targeted suites now to surface the first breakages, then I’ll tighten the aggregator state machine and update the aligned assertions together instead of guessing at the failures.
+[2026-05-12T22:16:00.600Z] Running command: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T22:16:03.645Z] Command failed: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 1)
+[2026-05-12T22:16:20.061Z] Running command: /bin/bash -lc 'rg -n "_await_generation_task_before_tool_followup|_mark_batch_ready_for_follo...
+[2026-05-12T22:16:20.079Z] Command completed: /bin/bash -lc 'rg -n "_await_generation_task_before_tool_followup|_mark_batch_ready_for_follo... (exit 0)
+[2026-05-12T22:16:22.776Z] Running command: /bin/bash -lc "sed -n '1638,1675p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:16:22.776Z] Command completed: /bin/bash -lc "sed -n '1638,1675p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:17:44.084Z] Running command: /bin/bash -lc "rg -n \"event_handler\\(\\\"on_assistant_turn_stopped\\\"|add_event_handler\\(...
+[2026-05-12T22:17:44.102Z] Command completed: /bin/bash -lc "rg -n \"event_handler\\(\\\"on_assistant_turn_stopped\\\"|add_event_handler\\(... (exit 0)
+[2026-05-12T22:18:27.967Z] Assistant message captured: I’m expanding the aligned suite around the exactness path now: one exact assistant row, mixed...
+
+[2026-05-12T22:18:27.967Z] Assistant message
+I’m expanding the aligned suite around the exactness path now: one exact assistant row, mixed text+tool suppression, live-context handler mutations, and the assistant-turn contract around the new timestamp location.
+[2026-05-12T22:19:16.591Z] Applying 1 file change(s).
+[2026-05-12T22:19:16.605Z] File changes completed.
+[2026-05-12T22:20:59.249Z] Applying 1 file change(s).
+[2026-05-12T22:20:59.250Z] File changes completed.
+[2026-05-12T22:21:09.336Z] Assistant message captured: The new cases are in. I’m running the targeted suite again now; at this point I expect the re...
+
+[2026-05-12T22:21:09.336Z] Assistant message
+The new cases are in. I’m running the targeted suite again now; at this point I expect the remaining work to be either real exactness bugs or assertion drift in the new tests, not missing wiring.
+[2026-05-12T22:21:11.180Z] Running command: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T22:21:17.280Z] Command failed: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 1)
+[2026-05-12T22:22:21.386Z] Assistant message captured: Three failures are clustered around followup timing and interrupted provisional-row cleanup. ...
+
+[2026-05-12T22:22:21.386Z] Assistant message
+Three failures are clustered around followup timing and interrupted provisional-row cleanup. I’m inspecting those in isolation now; the round-limit path is the likely service bug, and the interrupted-pass timeout needs a concrete context snapshot before I touch it.
+[2026-05-12T22:22:33.636Z] Running command: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T22:22:34.757Z] Command completed: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-12T22:24:19.709Z] Assistant message captured: I’ve isolated the service-side issue: the round-limit closure is re-entering too early becaus...
+
+[2026-05-12T22:24:19.709Z] Assistant message
+I’ve isolated the service-side issue: the round-limit closure is re-entering too early because its synthetic result is emitted from inside the still-running generation task, and interruptions are reaching the assistant aggregator after the generation end frame. I’m fixing those two orderings in the service now.
+[2026-05-12T22:24:37.540Z] Applying 1 file change(s).
+[2026-05-12T22:24:37.556Z] File changes completed.
+[2026-05-12T22:24:43.020Z] Applying 1 file change(s).
+[2026-05-12T22:24:43.021Z] File changes completed.
+[2026-05-12T22:24:47.977Z] Assistant message captured: The ordering fixes are in. I’m rerunning just the failing slice first so I can confirm the pr...
+
+[2026-05-12T22:24:47.977Z] Assistant message
+The ordering fixes are in. I’m rerunning just the failing slice first so I can confirm the provisional-row cleanup and round-limit closure behavior before I spend another full-suite run.
+[2026-05-12T22:24:51.189Z] Running command: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T22:24:52.289Z] Command completed: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-12T22:24:56.192Z] Running command: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T22:24:58.013Z] Command completed: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-12T22:25:03.757Z] Assistant message captured: The targeted tests are green. I’m doing the import smoke check now to make sure the bot wirin...
+
+[2026-05-12T22:25:03.757Z] Assistant message
+The targeted tests are green. I’m doing the import smoke check now to make sure the bot wiring and the service module both import cleanly with the new assistant-aggregator types exposed.
+[2026-05-12T22:25:06.013Z] Running command: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T22:25:06.883Z] Command completed: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-12T22:25:12.913Z] Running command: /bin/bash -lc 'git diff --stat -- src/nemotron_voice/services/nvidia/nemotron_omni.py src/nem...
+[2026-05-12T22:25:12.932Z] Command completed: /bin/bash -lc 'git diff --stat -- src/nemotron_voice/services/nvidia/nemotron_omni.py src/nem... (exit 0)
+[2026-05-12T22:25:49.727Z] Assistant message captured: 1. Work performed Modified [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkram...
+
+[2026-05-12T22:25:49.727Z] Assistant message
+1. Work performed
+
+Modified [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py), [src/nemotron_voice/bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bot.py), and [tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py).
+
+In `nemotron_omni.py` I added:
+- `NemotronExactAssistantMessageFrame`
+- `InterruptedToolPassSignal`
+- `NemotronAssistantAggregator`, scoped only to sync-tool exactness
+- service emission of the exact assistant message before sync tool execution and in the round-limit closure path
+- service-side ordering fixes so `InterruptionFrame` reaches the assistant aggregator before generation-end cleanup commits anything, and round-limit synthetic results re-enter only after the originating generation task is done
+
+In `bot.py` I changed the bash-enabled path to use `NemotronAssistantAggregator(..., interrupted_tool_pass_signal=signal)` and kept stock `LLMAssistantAggregator` when bash is disabled.
+
+In `tests/test_nemotron_omni_aligned.py` I updated the assistant attachment helper to use the real Nemotron aggregator for exactness-path tests and added/updated the sync-tool exactness, mixed-pass, interruption, cancel, handler-mutation, dedup, and round-limit cases.
+
+2. Current project status
+
+The requested verification passes.
+
+- `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr --group vllm-test python -m pytest -q tests/test_nemotron_omni_aligned.py tests/test_nemotron_omni_conversation_cache.py`
+  Result: `44 passed`
+- `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr python -c "import nemotron_voice.bot; import nemotron_voice.services.nvidia.nemotron_omni; print('imports-ok')"`
+  Result: `imports-ok`
+
+Tests added/changed cover:
+- exact single assistant/tool batch commits
+- mixed text+tool no-double-commit behavior
+- live `params.context` mutation surviving followup projection
+- interrupted provisional sync-tool batch removal plus signal set
+- cancel clearing provisional sync-tool rows / in-progress state
+- interrupted text-only partial commit staying stock
+- assistant-turn/timestamp contract in exact mode
+- dedup persistence across committed tool followups
+- dedup/round-accounting reset after interrupted uncommitted tool batches
+
+`tests/test_nemotron_omni_conversation_cache.py` did not need changes.
+
+3. Blockers, concerns, or deviations
+
+No blockers.
+
+Detection of “sync exactness active for this pass”:
+- `NemotronExactAssistantMessageFrame` sets `_current_exact_response_suppressed` for the current LLM response, which is what suppresses the stock text flush at `LLMFullResponseEndFrame`
+- the actual tool-pass lifecycle is tracked separately in `_active_exact_sync_pass`, so sync tool frames can still land before or after `LLMFullResponseEndFrame`
+
+Provisional-row tracking:
+- it is out-of-band in a per-pass `_NemotronProvisionalSyncToolPass`
+- that object stores the exact dict objects appended into the shared `LLMContext`
+- removal uses `LLMContext.transform_messages(...)` with identity checks, not value equality
+
+Mixed-pass suppression and interrupted-path behavior:
+- `push_aggregation()` suppresses context writes when `_current_exact_response_suppressed` is set
+- if an interruption removes provisional sync-tool rows, `_suppress_interrupted_aggregation_commit` keeps the parent `_trigger_assistant_turn_stopped()` transcript callback intact while preventing a partial assistant row from being committed back into context
+- that extra interrupted-followup suppression was necessary so an interrupted tool followup does not leave a stray partial assistant answer after the provisional tool batch is dropped
+
+Minimal signal shape:
+- `InterruptedToolPassSignal` is still just one `bool`
+- it is only constructed in `bot.py` and passed into `NemotronAssistantAggregator`
+- I intentionally did not wire it into `UserAudioContextCollector` yet; that remains for step 7
+
+One necessary service-side adjustment beyond the raw aggregator subclass:
+- round-limit synthetic results now emit from a small background task after the originating generation task ends, otherwise the closure followup could re-enter too early
+- `InterruptionFrame` forwarding was reordered so the assistant aggregator can drop provisional rows before generation-end processing finalizes the interrupted pass
+
+4. Suggested next step
+
+Implement step 7: consume `InterruptedToolPassSignal` in `UserAudioContextCollector` and add the `<user_interruption></user_interruption> ` prefix on the next committed user audio turn.
+[2026-05-12T22:25:49.801Z] Turn completed.
+
+[2026-05-12T22:25:49.845Z] Final output
+1. Work performed
+
+Modified [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py), [src/nemotron_voice/bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bot.py), and [tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py).
+
+In `nemotron_omni.py` I added:
+- `NemotronExactAssistantMessageFrame`
+- `InterruptedToolPassSignal`
+- `NemotronAssistantAggregator`, scoped only to sync-tool exactness
+- service emission of the exact assistant message before sync tool execution and in the round-limit closure path
+- service-side ordering fixes so `InterruptionFrame` reaches the assistant aggregator before generation-end cleanup commits anything, and round-limit synthetic results re-enter only after the originating generation task is done
+
+In `bot.py` I changed the bash-enabled path to use `NemotronAssistantAggregator(..., interrupted_tool_pass_signal=signal)` and kept stock `LLMAssistantAggregator` when bash is disabled.
+
+In `tests/test_nemotron_omni_aligned.py` I updated the assistant attachment helper to use the real Nemotron aggregator for exactness-path tests and added/updated the sync-tool exactness, mixed-pass, interruption, cancel, handler-mutation, dedup, and round-limit cases.
+
+2. Current project status
+
+The requested verification passes.
+
+- `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr --group vllm-test python -m pytest -q tests/test_nemotron_omni_aligned.py tests/test_nemotron_omni_conversation_cache.py`
+  Result: `44 passed`
+- `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr python -c "import nemotron_voice.bot; import nemotron_voice.services.nvidia.nemotron_omni; print('imports-ok')"`
+  Result: `imports-ok`
+
+Tests added/changed cover:
+- exact single assistant/tool batch commits
+- mixed text+tool no-double-commit behavior
+- live `params.context` mutation surviving followup projection
+- interrupted provisional sync-tool batch removal plus signal set
+- cancel clearing provisional sync-tool rows / in-progress state
+- interrupted text-only partial commit staying stock
+- assistant-turn/timestamp contract in exact mode
+- dedup persistence across committed tool followups
+- dedup/round-accounting reset after interrupted uncommitted tool batches
+
+`tests/test_nemotron_omni_conversation_cache.py` did not need changes.
+
+3. Blockers, concerns, or deviations
+
+No blockers.
+
+Detection of “sync exactness active for this pass”:
+- `NemotronExactAssistantMessageFrame` sets `_current_exact_response_suppressed` for the current LLM response, which is what suppresses the stock text flush at `LLMFullResponseEndFrame`
+- the actual tool-pass lifecycle is tracked separately in `_active_exact_sync_pass`, so sync tool frames can still land before or after `LLMFullResponseEndFrame`
+
+Provisional-row tracking:
+- it is out-of-band in a per-pass `_NemotronProvisionalSyncToolPass`
+- that object stores the exact dict objects appended into the shared `LLMContext`
+- removal uses `LLMContext.transform_messages(...)` with identity checks, not value equality
+
+Mixed-pass suppression and interrupted-path behavior:
+- `push_aggregation()` suppresses context writes when `_current_exact_response_suppressed` is set
+- if an interruption removes provisional sync-tool rows, `_suppress_interrupted_aggregation_commit` keeps the parent `_trigger_assistant_turn_stopped()` transcript callback intact while preventing a partial assistant row from being committed back into context
+- that extra interrupted-followup suppression was necessary so an interrupted tool followup does not leave a stray partial assistant answer after the provisional tool batch is dropped
+
+Minimal signal shape:
+- `InterruptedToolPassSignal` is still just one `bool`
+- it is only constructed in `bot.py` and passed into `NemotronAssistantAggregator`
+- I intentionally did not wire it into `UserAudioContextCollector` yet; that remains for step 7
+
+One necessary service-side adjustment beyond the raw aggregator subclass:
+- round-limit synthetic results now emit from a small background task after the originating generation task ends, otherwise the closure followup could re-enter too early
+- `InterruptionFrame` forwarding was reordered so the assistant aggregator can drop provisional rows before generation-end processing finalizes the interrupted pass
+
+4. Suggested next step
+
+Implement step 7: consume `InterruptedToolPassSignal` in `UserAudioContextCollector` and add the `<user_interruption></user_interruption> ` prefix on the next committed user audio turn.

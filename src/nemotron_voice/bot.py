@@ -59,9 +59,11 @@ from nemotron_voice.services.nvidia.nemotron_omni import (
     BASH_TOOL_DEFINITION,
     DEFAULT_AUDIO_PROMPT,
     DEFAULT_VOICE_SYSTEM_INSTRUCTION,
+    InterruptedToolPassSignal,
     NEMOTRON_OMNI_INSTRUCT_DEFAULT_MAX_TOKENS,
     NEMOTRON_OMNI_INSTRUCT_DEFAULT_TEMPERATURE,
     NEMOTRON_OMNI_INSTRUCT_DEFAULT_TOP_K,
+    NemotronAssistantAggregator,
     NemotronOmniAudioLLMService,
 )
 from pipecat.turns.user_stop import BaseUserTurnStopStrategy
@@ -459,6 +461,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     stt = _build_nemotron_speech_stt(audio_passthrough=False)
 
     context = _build_llm_context(enable_bash_tool=enable_bash_tool)
+    interrupted_tool_pass_signal = (
+        InterruptedToolPassSignal() if enable_bash_tool else None
+    )
     user_aggregator = AudioOnlyLLMUserAggregator(
         context,
         params=LLMUserAggregatorParams(
@@ -468,7 +473,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             ),
         ),
     )
-    assistant_aggregator = LLMAssistantAggregator(context)
+    assistant_aggregator = (
+        NemotronAssistantAggregator(
+            context,
+            interrupted_tool_pass_signal=interrupted_tool_pass_signal,
+        )
+        if enable_bash_tool
+        else LLMAssistantAggregator(context)
+    )
     audio_collector = UserAudioContextCollector(
         context=context,
         user_aggregator=user_aggregator,

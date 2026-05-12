@@ -44,6 +44,9 @@ from nemotron_voice.services.nvidia.nemotron_omni import (  # noqa: E402
     BASH_TOOL_DEFINITION,
     ChatCompletionPassResult,
     DEFAULT_VOICE_SYSTEM_INSTRUCTION,
+    InterruptedToolPassSignal,
+    NemotronAssistantAggregator,
+    NemotronExactAssistantMessageFrame,
     NemotronOmniAudioLLMService,
 )
 
@@ -308,8 +311,17 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         *,
         auto_reenter: bool = False,
         on_assistant_push: Callable[[Any, FrameDirection], Any] | None = None,
+        use_stock_assistant: bool = False,
+        interrupted_tool_pass_signal: InterruptedToolPassSignal | None = None,
     ) -> tuple[LLMAssistantAggregator, list[tuple[Any, FrameDirection]], list[tuple[Any, FrameDirection]]]:
-        assistant = LLMAssistantAggregator(context)
+        assistant: LLMAssistantAggregator
+        if use_stock_assistant:
+            assistant = LLMAssistantAggregator(context)
+        else:
+            assistant = NemotronAssistantAggregator(
+                context,
+                interrupted_tool_pass_signal=interrupted_tool_pass_signal,
+            )
         assistant.create_task = lambda coro, name=None: asyncio.create_task(coro, name=name)  # type: ignore[method-assign]
 
         async def cancel_task(task, timeout=None):
@@ -802,6 +814,286 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(json.loads(tool_rows[0]["content"])["stdout"], "/repo\n")
         self.assertEqual(len(payloads), 2)
 
+    async def test_sync_tool_round_commits_single_exact_assistant_message_and_tool_rows_as_one_batch(
+        self,
+    ) -> None:
+        service = self._make_service()
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "Inspect two things."}])
+        _, service_frames, assistant_frames = self._attach_assistant(service, context)
+
+        async def fake_stream(payload, **kwargs):
+            await service._push_llm_text("Checking the workspace.")
+            return ChatCompletionPassResult(
+                output_text="Checking the workspace.",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                    },
+                    {
+                        "id": "call_2",
+                        "type": "function",
+                        "function": {"name": "run_bash", "arguments": '{"code":"ls"}'},
+                    },
+                ],
+                first_token=False,
+            )
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": f"ran {code}",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": code,
+                "stderr": "",
+            }
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len([m for m in context.get_messages() if m.get("role") == "tool"]) == 2
+        )
+
+        assistant_rows = [m for m in context.get_messages() if m.get("role") == "assistant"]
+        tool_rows = [m for m in context.get_messages() if m.get("role") == "tool"]
+        self.assertEqual(len(assistant_rows), 1)
+        self.assertEqual(assistant_rows[0]["content"], "Checking the workspace.")
+        self.assertEqual(len(assistant_rows[0]["tool_calls"]), 2)
+        self.assertEqual([json.loads(row["content"])["stdout"] for row in tool_rows], ["pwd", "ls"])
+        self.assertNotIn(
+            {"role": "assistant", "content": "Checking the workspace."},
+            context.get_messages(),
+        )
+        self.assertTrue(all(row["content"] != "IN_PROGRESS" for row in tool_rows))
+        self.assertEqual(
+            [type(frame) for frame, _ in assistant_frames if isinstance(frame, LLMContextAssistantTimestampFrame)],
+            [LLMContextAssistantTimestampFrame],
+        )
+        self.assertTrue(
+            any(
+                isinstance(frame, NemotronExactAssistantMessageFrame)
+                for frame, direction in service_frames
+                if direction is FrameDirection.DOWNSTREAM
+            )
+        )
+
+    async def test_shared_context_mixed_assistant_message_matches_stream(self) -> None:
+        service = self._make_service()
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "Use bash and narrate."}])
+        _, service_frames, _ = self._attach_assistant(service, context)
+
+        async def fake_stream(payload, **kwargs):
+            await service._push_llm_text("Let me ")
+            await service._push_llm_text("check")
+            return ChatCompletionPassResult(
+                output_text="Let me check",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                    }
+                ],
+                first_token=False,
+            )
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": "ran pwd",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "/repo\n",
+                "stderr": "",
+            }
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: any(message.get("role") == "tool" for message in context.get_messages())
+        )
+
+        assistant_row = next(
+            message for message in context.get_messages() if message.get("role") == "assistant"
+        )
+        self.assertEqual(assistant_row["content"], "Let me check")
+        self.assertEqual(
+            [frame.text for frame, direction in service_frames if direction is FrameDirection.DOWNSTREAM and isinstance(frame, LLMTextFrame)],
+            ["Let me ", "check"],
+        )
+        self.assertEqual(
+            assistant_row["tool_calls"],
+            [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                }
+            ],
+        )
+
+    async def test_mixed_pass_does_not_double_commit_assistant_row(self) -> None:
+        service = self._make_service()
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "Narrate then use bash."}])
+        self._attach_assistant(service, context)
+
+        async def fake_stream(payload, **kwargs):
+            await service._push_llm_text("Checking now.")
+            return ChatCompletionPassResult(
+                output_text="Checking now.",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                    }
+                ],
+                first_token=False,
+            )
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": "done",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "/repo\n",
+                "stderr": "",
+            }
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: any(message.get("role") == "tool" for message in context.get_messages())
+        )
+
+        assistant_rows = [m for m in context.get_messages() if m.get("role") == "assistant"]
+        self.assertEqual(len(assistant_rows), 1)
+        self.assertEqual(assistant_rows[0]["content"], "Checking now.")
+        self.assertIn("tool_calls", assistant_rows[0])
+
+    async def test_sync_tool_handler_context_mutation_survives_followup_projection(self) -> None:
+        service = self._make_service()
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "Original prompt"}])
+        self._attach_assistant(service, context, auto_reenter=True)
+        payloads: list[dict[str, Any]] = []
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            await service._push_llm_text("done")
+            return ChatCompletionPassResult(output_text="done", tool_calls=[], first_token=False)
+
+        async def mutate_live_context(params):
+            params.context.get_messages()[0]["content"] = "Mutated prompt"
+            params.context.add_message({"role": "assistant", "content": "handler context edit"})
+            if service._mark_batch_ready_for_followup(params.tool_call_id):
+                await service._await_generation_task_before_tool_followup()
+            await params.result_callback(
+                {
+                    "ok": True,
+                    "status": "success",
+                    "summary": "done",
+                    "command": "pwd",
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "stdout": "/repo\n",
+                    "stderr": "",
+                }
+            )
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service.register_function("run_bash", mutate_live_context, cancel_on_interruption=True)
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len(payloads) == 2
+            and context.get_messages()[-1] == {"role": "assistant", "content": "done"}
+        )
+
+        self.assertIn({"role": "user", "content": "Mutated prompt"}, payloads[1]["messages"])
+        self.assertIn(
+            {"role": "assistant", "content": "handler context edit"},
+            payloads[1]["messages"],
+        )
+
+    async def test_assistant_turn_contract_preserved_with_exact_assistant_appends(self) -> None:
+        service = self._make_service()
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "Explain while using bash."}])
+        assistant, _, assistant_frames = self._attach_assistant(service, context)
+        stopped_messages = []
+
+        @assistant.event_handler("on_assistant_turn_stopped")
+        async def on_assistant_turn_stopped(_, message):
+            stopped_messages.append(message)
+
+        async def fake_stream(payload, **kwargs):
+            await service._push_llm_text("Let me check.")
+            return ChatCompletionPassResult(
+                output_text="Let me check.",
+                tool_calls=[
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                    }
+                ],
+                first_token=False,
+            )
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": "done",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "/repo\n",
+                "stderr": "",
+            }
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: any(message.get("role") == "tool" for message in context.get_messages())
+        )
+
+        timestamp_frames = [
+            frame for frame, _ in assistant_frames if isinstance(frame, LLMContextAssistantTimestampFrame)
+        ]
+        self.assertEqual(len(timestamp_frames), 1)
+        self.assertEqual(len(stopped_messages), 1)
+        self.assertEqual(stopped_messages[0].content, "Let me check.")
+        self.assertFalse(stopped_messages[0].interrupted)
+
     async def test_interrupted_multi_tool_batch_gives_every_tool_call_id_a_terminal_lifecycle_signal(
         self,
     ) -> None:
@@ -933,6 +1225,89 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         await started.wait()
         await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
         await self._wait_until(lambda: queued_cancel_batch == ["call_2", "call_3"])
+
+    async def test_function_call_cancel_during_provisional_pass_drops_staged_batch_and_clears_in_progress(
+        self,
+    ) -> None:
+        context = self._context_with_messages([{"role": "user", "content": "Cancel a tool pass."}])
+        assistant = NemotronAssistantAggregator(context)
+        assistant.create_task = lambda coro, name=None: asyncio.create_task(coro, name=name)  # type: ignore[method-assign]
+
+        async def cancel_task(task, timeout=None):
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+        assistant.cancel_task = cancel_task  # type: ignore[method-assign]
+        assistant.push_frame = lambda frame, direction=FrameDirection.DOWNSTREAM: asyncio.sleep(0)  # type: ignore[method-assign]
+
+        function_calls = [
+            FunctionCallFromLLM(
+                function_name="run_bash",
+                tool_call_id="call_1",
+                arguments={"code": "pwd"},
+                context=context,
+            ),
+            FunctionCallFromLLM(
+                function_name="run_bash",
+                tool_call_id="call_2",
+                arguments={"code": "ls"},
+                context=context,
+            ),
+        ]
+        await assistant.process_frame(
+            NemotronExactAssistantMessageFrame(
+                message={
+                    "role": "assistant",
+                    "content": "Checking.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"ls"}'},
+                        },
+                    ],
+                }
+            ),
+            FrameDirection.DOWNSTREAM,
+        )
+        await assistant.process_frame(
+            FunctionCallsStartedFrame(function_calls=function_calls),
+            FrameDirection.DOWNSTREAM,
+        )
+        await assistant.process_frame(
+            FunctionCallInProgressFrame(
+                function_name="run_bash",
+                tool_call_id="call_1",
+                arguments={"code": "pwd"},
+                cancel_on_interruption=True,
+            ),
+            FrameDirection.DOWNSTREAM,
+        )
+        await assistant.process_frame(
+            FunctionCallCancelFrame(function_name="run_bash", tool_call_id="call_2"),
+            FrameDirection.DOWNSTREAM,
+        )
+        await assistant.process_frame(
+            FunctionCallCancelFrame(function_name="run_bash", tool_call_id="call_1"),
+            FrameDirection.DOWNSTREAM,
+        )
+
+        self.assertNotIn("call_1", assistant._function_calls_in_progress)
+        self.assertNotIn("call_2", assistant._function_calls_in_progress)
+        # Both sync-tool calls were cancelled, so the whole staged batch — the
+        # exact assistant(tool_calls) row AND its provisional tool rows — must be
+        # gone (a tool_calls row with no matching tool rows is an invalid
+        # transcript shape).
+        self.assertEqual(
+            context.get_messages(),
+            [{"role": "user", "content": "Cancel a tool pass."}],
+        )
 
     async def test_cancel_running_sync_tool_does_not_kill_sequential_runner(self) -> None:
         service = self._make_service()
@@ -1107,6 +1482,70 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertIn("call_old", cancel_ids)
 
+    async def test_interrupted_sync_tool_turn_drops_provisional_batch_and_appends_new_user_row(
+        self,
+    ) -> None:
+        service = self._make_service()
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "First turn"}])
+        signal = InterruptedToolPassSignal()
+        self._attach_assistant(
+            service,
+            context,
+            auto_reenter=True,
+            interrupted_tool_pass_signal=signal,
+        )
+        followup_started = asyncio.Event()
+
+        async def fake_stream(payload, **kwargs):
+            if payload["messages"][-1]["content"] == "First turn":
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+
+            await service._push_llm_text("Partial answer")
+            followup_started.set()
+            await asyncio.Future()
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": "done",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "/repo\n",
+                "stderr": "",
+            }
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await followup_started.wait()
+        await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: signal.replace_interrupted_tool_pass
+            and context.get_messages() == [{"role": "user", "content": "First turn"}]
+        )
+
+        context.add_message({"role": "user", "content": "Second turn"})
+        self.assertEqual(
+            context.get_messages(),
+            [
+                {"role": "user", "content": "First turn"},
+                {"role": "user", "content": "Second turn"},
+            ],
+        )
+
     async def test_round_limit_synthesizes_terminal_tool_rows_and_allows_one_closure_pass(self) -> None:
         service = self._make_service(bash_tool_max_rounds=1)
         await self._prime_service_for_tools(service)
@@ -1174,6 +1613,231 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(executed_codes, ["pwd"])
         self.assertIn("round_limit_reached", statuses)
         self.assertEqual(len(payloads), 3)
+
+    async def test_interrupted_text_pass_commits_partial_assistant_row_then_next_turn_uses_assistant_partial_plus_user_suffix(
+        self,
+    ) -> None:
+        service = self._make_service()
+        context = self._context_with_messages([{"role": "user", "content": "First turn"}])
+        self._attach_assistant(service, context, auto_reenter=False)
+        payloads: list[dict[str, Any]] = []
+        first_response_started = asyncio.Event()
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                await service._push_llm_text("Partial")
+                first_response_started.set()
+                await asyncio.Future()
+            await service._push_llm_text("second answer")
+            return ChatCompletionPassResult(
+                output_text="second answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await first_response_started.wait()
+        await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: context.get_messages()
+            == [
+                {"role": "user", "content": "First turn"},
+                {"role": "assistant", "content": "Partial"},
+            ]
+        )
+
+        context.add_message({"role": "user", "content": "Second turn"})
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len(payloads) == 2
+            and context.get_messages()[-1] == {"role": "assistant", "content": "second answer"}
+        )
+
+        self.assertEqual(
+            payloads[1]["messages"][-2:],
+            [
+                {"role": "assistant", "content": "Partial"},
+                {"role": "user", "content": "Second turn"},
+            ],
+        )
+
+    async def test_duplicate_bash_call_dedup_persists_across_committed_tool_followup_reentry_within_one_user_turn(
+        self,
+    ) -> None:
+        service = self._make_service()
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "Keep checking pwd."}])
+        self._attach_assistant(service, context, auto_reenter=True)
+        payloads: list[dict[str, Any]] = []
+        executed_codes: list[str] = []
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            if len(payloads) == 2:
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            await service._push_llm_text("done")
+            return ChatCompletionPassResult(output_text="done", tool_calls=[], first_token=False)
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            executed_codes.append(code)
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": "done",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "/repo\n",
+                "stderr": "",
+            }
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len(payloads) == 3
+            and context.get_messages()[-1] == {"role": "assistant", "content": "done"}
+        )
+
+        tool_statuses = [
+            json.loads(message["content"])["status"]
+            for message in context.get_messages()
+            if message.get("role") == "tool"
+        ]
+        self.assertEqual(executed_codes, ["pwd"])
+        self.assertEqual(tool_statuses, ["success", "duplicate_suppressed"])
+
+    async def test_interrupted_uncommitted_tool_batch_clears_dedup_and_round_accounting(
+        self,
+    ) -> None:
+        service = self._make_service(bash_tool_max_rounds=1)
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "First turn"}])
+        signal = InterruptedToolPassSignal()
+        self._attach_assistant(
+            service,
+            context,
+            auto_reenter=True,
+            interrupted_tool_pass_signal=signal,
+        )
+        payloads: list[dict[str, Any]] = []
+        executed_codes: list[str] = []
+        blocked_closure = asyncio.Event()
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            if len(payloads) == 2:
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            if len(payloads) == 3:
+                await service._push_llm_text("Partial closure")
+                blocked_closure.set()
+                await asyncio.Future()
+            if len(payloads) == 4:
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_3",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            await service._push_llm_text("second turn done")
+            return ChatCompletionPassResult(
+                output_text="second turn done",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            executed_codes.append(code)
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": "done",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "/repo\n",
+                "stderr": "",
+            }
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await blocked_closure.wait()
+        await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: signal.replace_interrupted_tool_pass
+            and all(
+                json.loads(message["content"])["status"] != "round_limit_reached"
+                for message in context.get_messages()
+                if message.get("role") == "tool"
+            )
+        )
+
+        context.add_message({"role": "user", "content": "Second turn"})
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len(payloads) == 5
+            and context.get_messages()[-1] == {"role": "assistant", "content": "second turn done"}
+        )
+
+        tool_statuses = [
+            json.loads(message["content"])["status"]
+            for message in context.get_messages()
+            if message.get("role") == "tool"
+        ]
+        self.assertEqual(executed_codes, ["pwd", "pwd"])
+        self.assertEqual(tool_statuses, ["success", "success"])
 
     async def test_bot_speaking_defers_tool_result_reentry_until_bot_stopped_speaking(self) -> None:
         service = self._make_service()

@@ -1,0 +1,160 @@
+[2026-05-12T22:29:18.936Z] Starting Codex Task.
+[2026-05-12T22:29:21.368Z] Starting Codex task thread.
+[2026-05-12T22:29:21.457Z] Thread ready (019e1e4f-1b85-7852-b025-ed958c5eb857).
+[2026-05-12T22:29:21.482Z] Turn started (019e1e4f-1bc3-7193-9489-6d6d78326f2a).
+[2026-05-12T22:29:36.271Z] Assistant message captured: Reviewing the uncommitted step-4 changes against the plan and the stock Pipecat aggregators. ...
+
+[2026-05-12T22:29:36.271Z] Assistant message
+Reviewing the uncommitted step-4 changes against the plan and the stock Pipecat aggregators. I’m pulling the diff, the relevant plan sections, and the referenced framework files first so I can check the exact state-machine and frame-ordering assumptions.
+[2026-05-12T22:29:36.320Z] Running command: /bin/bash -lc 'git diff -- src/nemotron_voice/services/nvidia/nemotron_omni.py src/nemotron_v...
+[2026-05-12T22:29:36.339Z] Command completed: /bin/bash -lc 'git diff -- src/nemotron_voice/services/nvidia/nemotron_omni.py src/nemotron_v... (exit 0)
+[2026-05-12T22:29:36.339Z] Running command: /bin/bash -lc "nl -ba proj-2026-05-11-2008/PLAN.md | sed -n '1,260p'"
+[2026-05-12T22:29:36.357Z] Command completed: /bin/bash -lc "nl -ba proj-2026-05-11-2008/PLAN.md | sed -n '1,260p'" (exit 0)
+[2026-05-12T22:29:36.357Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_response_unive...
+[2026-05-12T22:29:36.357Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_context.py | s...
+[2026-05-12T22:29:36.358Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_response_unive... (exit 0)
+[2026-05-12T22:29:36.358Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_context.py | s... (exit 0)
+[2026-05-12T22:29:36.358Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '1,420p'"
+[2026-05-12T22:29:36.358Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '1,420p'" (exit 0)
+[2026-05-12T22:29:52.921Z] Assistant message captured: I have the high-level diff and plan context. Next I’m reading the exact aggregator/service me...
+
+[2026-05-12T22:29:52.921Z] Assistant message
+I have the high-level diff and plan context. Next I’m reading the exact aggregator/service methods and the stock Pipecat handlers they rely on, especially the function-call and interruption paths where ordering bugs would hide.
+[2026-05-12T22:29:52.955Z] Running command: /bin/bash -lc 'rg -n "class NemotronAssistantAggregator|NemotronExactAssistantMessageFrame|In...
+[2026-05-12T22:29:52.956Z] Command completed: /bin/bash -lc 'rg -n "class NemotronAssistantAggregator|NemotronExactAssistantMessageFrame|In... (exit 0)
+[2026-05-12T22:29:52.956Z] Running command: /bin/bash -lc 'rg -n "_attach_assistant|NemotronAssistantAggregator|InterruptedToolPassSignal...
+[2026-05-12T22:29:52.973Z] Command completed: /bin/bash -lc 'rg -n "_attach_assistant|NemotronAssistantAggregator|InterruptedToolPassSignal... (exit 0)
+[2026-05-12T22:29:52.973Z] Running command: /bin/bash -lc 'rg -n "class LLMAssistantAggregator|def push_aggregation|def _handle_llm_start...
+[2026-05-12T22:29:52.992Z] Command completed: /bin/bash -lc 'rg -n "class LLMAssistantAggregator|def push_aggregation|def _handle_llm_start... (exit 0)
+[2026-05-12T22:29:52.992Z] Running command: /bin/bash -lc "nl -ba proj-2026-05-11-2008/PLAN.md | sed -n '120,205p'"
+[2026-05-12T22:29:52.992Z] Command completed: /bin/bash -lc "nl -ba proj-2026-05-11-2008/PLAN.md | sed -n '120,205p'" (exit 0)
+[2026-05-12T22:30:05.622Z] Assistant message captured: I’ve narrowed it to the exact methods that matter. Now I’m comparing the subclass against the...
+
+[2026-05-12T22:30:05.622Z] Assistant message
+I’ve narrowed it to the exact methods that matter. Now I’m comparing the subclass against the stock assistant aggregator line by line, then checking whether the service’s frame ordering really satisfies the assumptions the subclass makes.
+[2026-05-12T22:30:05.666Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_response_unive...
+[2026-05-12T22:30:05.667Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_response_unive... (exit 0)
+[2026-05-12T22:30:05.670Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '223,520p'"
+[2026-05-12T22:30:05.671Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '223,520p'" (exit 0)
+[2026-05-12T22:30:05.678Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '620,910p'"
+[2026-05-12T22:30:05.678Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '620,910p'" (exit 0)
+[2026-05-12T22:30:05.682Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '1220,1545p'"
+[2026-05-12T22:30:05.683Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '1220,1545p'" (exit 0)
+[2026-05-12T22:30:05.694Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '300,430p'"
+[2026-05-12T22:30:05.714Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '300,430p'" (exit 0)
+[2026-05-12T22:30:05.714Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1030,1315p'"
+[2026-05-12T22:30:05.715Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1030,1315p'" (exit 0)
+[2026-05-12T22:30:05.715Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1490,1795p'"
+[2026-05-12T22:30:05.715Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1490,1795p'" (exit 0)
+[2026-05-12T22:30:21.668Z] Assistant message captured: The remaining unknowns are in Pipecat’s runner and frame-delivery semantics, not the Nemotron...
+
+[2026-05-12T22:30:21.668Z] Assistant message
+The remaining unknowns are in Pipecat’s runner and frame-delivery semantics, not the Nemotron diff itself. I’m checking the service’s batch bookkeeping and the base `LLMService`/`FrameProcessor` methods now, because the interruption review depends on what gets queued versus cancelled, and in what order.
+[2026-05-12T22:30:21.715Z] Running command: /bin/bash -lc "rg -n \"class _.*Batch|_tool_batch_states|_current_batch_id|_pending_followup_...
+[2026-05-12T22:30:21.735Z] Command completed: /bin/bash -lc "rg -n \"class _.*Batch|_tool_batch_states|_current_batch_id|_pending_followup_... (exit 0)
+[2026-05-12T22:30:21.735Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '520,620p'"
+[2026-05-12T22:30:21.735Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '520,620p'" (exit 0)
+[2026-05-12T22:30:21.735Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '910,1220p'"
+[2026-05-12T22:30:21.735Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '910,1220p'" (exit 0)
+[2026-05-12T22:30:21.738Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/services/llm_service.py | sed -n '1,420p'"
+[2026-05-12T22:30:21.739Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/services/llm_service.py | sed -n '1,420p'" (exit 0)
+[2026-05-12T22:30:21.746Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/pipeline/parallel_pipeline.py | sed -n '1...
+[2026-05-12T22:30:21.746Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/pipeline/parallel_pipeline.py | sed -n '1... (exit 0)
+[2026-05-12T22:30:21.748Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/frame_processor.py | sed -n '1...
+[2026-05-12T22:30:21.748Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/frame_processor.py | sed -n '1... (exit 0)
+[2026-05-12T22:30:30.913Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/frame_processor.py | sed -n '6...
+[2026-05-12T22:30:30.914Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/frame_processor.py | sed -n '6... (exit 0)
+[2026-05-12T22:30:30.926Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/services/llm_service.py | sed -n '440,940p'"
+[2026-05-12T22:30:30.927Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/services/llm_service.py | sed -n '440,940p'" (exit 0)
+[2026-05-12T22:30:30.939Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/services/llm_service.py | sed -n '1088,11...
+[2026-05-12T22:30:30.939Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/services/llm_service.py | sed -n '1088,11... (exit 0)
+[2026-05-12T22:30:30.949Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '1560,1695p'"
+[2026-05-12T22:30:30.949Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n '1560,1695p'" (exit 0)
+[2026-05-12T22:30:30.972Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1790,1955p'"
+[2026-05-12T22:30:30.988Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1790,1955p'" (exit 0)
+[2026-05-12T22:30:40.772Z] Running command: /bin/bash -lc 'rg -n "class FunctionCallFromLLM|class FunctionCallsStartedFrame|class Functio...
+[2026-05-12T22:30:40.787Z] Command completed: /bin/bash -lc 'rg -n "class FunctionCallFromLLM|class FunctionCallsStartedFrame|class Functio... (exit 0)
+[2026-05-12T22:30:40.787Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '720,970p'"
+[2026-05-12T22:30:40.787Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '720,970p'" (exit 0)
+[2026-05-12T22:30:40.787Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '1580,1685p'"
+[2026-05-12T22:30:40.787Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '1580,1685p'" (exit 0)
+[2026-05-12T22:31:01.333Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '470,735p'"
+[2026-05-12T22:31:01.333Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '470,735p'" (exit 0)
+[2026-05-12T22:31:01.343Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '1100,1188p'"
+[2026-05-12T22:31:01.344Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '1100,1188p'" (exit 0)
+[2026-05-12T22:31:01.348Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '1768,1818p'"
+[2026-05-12T22:31:01.348Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/frames/frames.py | sed -n '1768,1818p'" (exit 0)
+[2026-05-12T22:31:06.602Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_context.py | s...
+[2026-05-12T22:31:06.603Z] Running command: /bin/bash -lc 'rg -n "def add_message|def transform_messages|def set_messages|self._messages"...
+[2026-05-12T22:31:06.603Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/aggregators/llm_context.py | s... (exit 0)
+[2026-05-12T22:31:06.603Z] Command completed: /bin/bash -lc 'rg -n "def add_message|def transform_messages|def set_messages|self._messages"... (exit 0)
+[2026-05-12T22:31:09.195Z] Assistant message captured: I’ve got enough context to start judging behavior instead of just collecting it. I’m now walk...
+
+[2026-05-12T22:31:09.195Z] Assistant message
+I’ve got enough context to start judging behavior instead of just collecting it. I’m now walking concrete timelines through the code: normal mixed pass, cancellation before start, cancellation mid-run, interruption during followup generation, and round-limit closure.
+[2026-05-12T22:31:13.766Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '440,520p'"
+[2026-05-12T22:31:13.766Z] Running command: /bin/bash -lc "rg -n \"InterruptedToolPassSignal|replace_interrupted_tool_pass|UserAudioConte...
+[2026-05-12T22:31:13.766Z] Command completed: /bin/bash -lc "rg -n \"InterruptedToolPassSignal|replace_interrupted_tool_pass|UserAudioConte... (exit 0)
+[2026-05-12T22:31:13.766Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '440,520p'" (exit 0)
+[2026-05-12T22:31:17.907Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '300,420p'"
+[2026-05-12T22:31:17.907Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '300,420p'" (exit 0)
+[2026-05-12T22:31:34.742Z] Running command: /bin/bash -lc 'rg -n "def queue_frame|def process_frame|__input_frame_task_handler|__process_...
+[2026-05-12T22:31:34.742Z] Command completed: /bin/bash -lc 'rg -n "def queue_frame|def process_frame|__input_frame_task_handler|__process_... (exit 0)
+[2026-05-12T22:31:34.750Z] Running command: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/frame_processor.py | sed -n '3...
+[2026-05-12T22:31:34.750Z] Command completed: /bin/bash -lc "nl -ba pipecat-core-code/src/pipecat/processors/frame_processor.py | sed -n '3... (exit 0)
+[2026-05-12T22:34:05.373Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1300,1338p'"
+[2026-05-12T22:34:05.391Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1300,1338p'" (exit 0)
+[2026-05-12T22:35:32.786Z] Assistant message captured: I have two likely correctness problems and one real ordering risk. I’m running a narrow test ...
+
+[2026-05-12T22:35:32.786Z] Assistant message
+I have two likely correctness problems and one real ordering risk. I’m running a narrow test slice now to see which assumptions the current tests actually lock in, especially around the cancel path that looks invalid on transcript shape.
+[2026-05-12T22:35:35.528Z] Running command: /bin/bash -lc "pytest -q tests/test_nemotron_omni_aligned.py -k 'assistant_turn_contract_pres...
+[2026-05-12T22:35:35.528Z] Command failed: /bin/bash -lc "pytest -q tests/test_nemotron_omni_aligned.py -k 'assistant_turn_contract_pres... (exit 127)
+[2026-05-12T22:35:40.487Z] Running command: /bin/bash -lc 'rg -n "new user|Second turn|latest_user_key|supersed|provisional|orphan|Functi...
+[2026-05-12T22:35:40.487Z] Command completed: /bin/bash -lc 'rg -n "new user|Second turn|latest_user_key|supersed|provisional|orphan|Functi... (exit 0)
+[2026-05-12T22:35:44.371Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1388,1498p'"
+[2026-05-12T22:35:44.371Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '1388,1498p'" (exit 0)
+[2026-05-12T22:37:36.324Z] Running command: /bin/bash -lc 'rg -n "_pending_exact_assistant_batch_id|batch_id" src/nemotron_voice/services...
+[2026-05-12T22:37:36.344Z] Command completed: /bin/bash -lc 'rg -n "_pending_exact_assistant_batch_id|batch_id" src/nemotron_voice/services... (exit 0)
+[2026-05-12T22:37:58.639Z] Running command: /bin/bash -lc "rg -n \"single_exact_assistant|mixed_pass_does_not_double_commit|shared_contex...
+[2026-05-12T22:37:58.659Z] Command completed: /bin/bash -lc "rg -n \"single_exact_assistant|mixed_pass_does_not_double_commit|shared_contex... (exit 0)
+[2026-05-12T22:39:50.154Z] Assistant message captured: 1. High — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-n...
+
+[2026-05-12T22:39:50.154Z] Assistant message
+1. High — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:395): `_handle_function_call_cancel()` removes the canceled provisional `tool` row, but when that was the last live sync-tool row it never removes the provisional `assistant(tool_calls)` row. `_maybe_clear_active_exact_sync_pass()` only drops the pointer ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:469)), and `_commit_response_candidates()` can later mark that assistant-only row committed ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:442)). The no-`InterruptionFrame` new-user supersession path only emits per-tool cancels ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:639)), so this is reachable in the real bot. The new test currently codifies the invalid shape by expecting the orphaned assistant row to remain ([tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py:1303)).
+
+2. Medium — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:1488): the round-limit closure path broadcasts `FunctionCallsStartedFrame` immediately, then defers all `FunctionCallInProgressFrame`/`FunctionCallResultFrame` cleanup to `_round_limit_result_task` ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:1496)). Those closure calls are never registered in `_tool_batch_states`, so supersession/cancel paths that rely on `_prepare_batch_supersession()` ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:762)) cannot emit terminal cancels for untouched ids when the task is canceled on new turn / interruption / stop ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:655), [nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:679)). Result: `FunctionCallsStartedFrame` placeholders and/or partial `tool` rows can be stranded forever.
+
+3. Medium — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:676): the interruption ordering is not actually enforced. The service calls `self._generation_task.cancel()` before it queues `InterruptionFrame`, while the canceled generation task always queues `LLMFullResponseEndFrame` in `finally` ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:703)). If that end frame is processed first, `_handle_llm_end()` will still commit `_response_commit_candidates` because `_current_response_interrupted` is only flipped by the later interruption ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:302)). The inline harness hides this race by calling `assistant.process_frame()` synchronously from `forward_service_frame()` ([tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py:345)), which is not how the queued pipeline behaves.
+
+4. Medium — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:1247): the exact assistant row is built from raw `result.tool_calls`, but `_function_calls_from_tool_calls()` silently drops malformed / non-object argument payloads ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:1443)). A response with one bad tool call therefore writes an `assistant(tool_calls)` row that names more `tool_call_id`s than the runner will ever produce `tool` rows for. That recreates the exact invalid transcript shape step 4 is supposed to prevent, and there is no coverage for it.
+
+Verified sound:
+- `_remove_provisional_rows()` uses identity (`is`), so the provisional marker does not leak into wire payloads and equal dicts are not conflated.
+- The mixed text+tool suppression seam is the right one: `LLMTextFrame`s still flow, `push_aggregation()` still returns the spoken preamble for `on_assistant_turn_stopped`, and the suppressed flush does not emit a duplicate timestamp.
+- The cancel override does fix the step-3 `None`-placeholder bug: queued-never-started sync calls are deleted from `_function_calls_in_progress`.
+- `bot.py` does correctly choose `NemotronAssistantAggregator` only when bash is enabled and falls back to stock `LLMAssistantAggregator` otherwise.
+
+Static review only: `pytest` is not installed in this environment, so I did not run the test file.
+
+Verdict: fix findings 1-4 first.
+[2026-05-12T22:39:50.195Z] Turn completed.
+
+[2026-05-12T22:39:50.235Z] Final output
+1. High — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:395): `_handle_function_call_cancel()` removes the canceled provisional `tool` row, but when that was the last live sync-tool row it never removes the provisional `assistant(tool_calls)` row. `_maybe_clear_active_exact_sync_pass()` only drops the pointer ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:469)), and `_commit_response_candidates()` can later mark that assistant-only row committed ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:442)). The no-`InterruptionFrame` new-user supersession path only emits per-tool cancels ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:639)), so this is reachable in the real bot. The new test currently codifies the invalid shape by expecting the orphaned assistant row to remain ([tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py:1303)).
+
+2. Medium — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:1488): the round-limit closure path broadcasts `FunctionCallsStartedFrame` immediately, then defers all `FunctionCallInProgressFrame`/`FunctionCallResultFrame` cleanup to `_round_limit_result_task` ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:1496)). Those closure calls are never registered in `_tool_batch_states`, so supersession/cancel paths that rely on `_prepare_batch_supersession()` ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:762)) cannot emit terminal cancels for untouched ids when the task is canceled on new turn / interruption / stop ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:655), [nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:679)). Result: `FunctionCallsStartedFrame` placeholders and/or partial `tool` rows can be stranded forever.
+
+3. Medium — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:676): the interruption ordering is not actually enforced. The service calls `self._generation_task.cancel()` before it queues `InterruptionFrame`, while the canceled generation task always queues `LLMFullResponseEndFrame` in `finally` ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:703)). If that end frame is processed first, `_handle_llm_end()` will still commit `_response_commit_candidates` because `_current_response_interrupted` is only flipped by the later interruption ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:302)). The inline harness hides this race by calling `assistant.process_frame()` synchronously from `forward_service_frame()` ([tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py:345)), which is not how the queued pipeline behaves.
+
+4. Medium — [src/nemotron_voice/services/nvidia/nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:1247): the exact assistant row is built from raw `result.tool_calls`, but `_function_calls_from_tool_calls()` silently drops malformed / non-object argument payloads ([nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py:1443)). A response with one bad tool call therefore writes an `assistant(tool_calls)` row that names more `tool_call_id`s than the runner will ever produce `tool` rows for. That recreates the exact invalid transcript shape step 4 is supposed to prevent, and there is no coverage for it.
+
+Verified sound:
+- `_remove_provisional_rows()` uses identity (`is`), so the provisional marker does not leak into wire payloads and equal dicts are not conflated.
+- The mixed text+tool suppression seam is the right one: `LLMTextFrame`s still flow, `push_aggregation()` still returns the spoken preamble for `on_assistant_turn_stopped`, and the suppressed flush does not emit a duplicate timestamp.
+- The cancel override does fix the step-3 `None`-placeholder bug: queued-never-started sync calls are deleted from `_function_calls_in_progress`.
+- `bot.py` does correctly choose `NemotronAssistantAggregator` only when bash is enabled and falls back to stock `LLMAssistantAggregator` otherwise.
+
+Static review only: `pytest` is not installed in this environment, so I did not run the test file.
+
+Verdict: fix findings 1-4 first.

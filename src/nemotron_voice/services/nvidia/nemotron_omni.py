@@ -32,6 +32,7 @@ from loguru import logger
 
 from pipecat.frames.frames import (
     CancelFrame,
+    DataFrame,
     EndFrame,
     ErrorFrame,
     Frame,
@@ -42,6 +43,7 @@ from pipecat.frames.frames import (
     FunctionCallsStartedFrame,
     InputAudioRawFrame,
     InterruptionFrame,
+    LLMContextAssistantTimestampFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
@@ -54,6 +56,7 @@ from pipecat.processors.aggregators.llm_context import (
     LLMSpecificMessage,
     is_given as context_is_given,
 )
+from pipecat.processors.aggregators.llm_response_universal import LLMAssistantAggregator
 from pipecat.processors.frame_processor import FrameDirection
 from pipecat.services.llm_service import (
     FunctionCallParams,
@@ -61,6 +64,7 @@ from pipecat.services.llm_service import (
     LLMService,
 )
 from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
+from pipecat.utils.time import time_now_iso8601
 
 _TRACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 
@@ -160,6 +164,17 @@ BASH_TOOL_DEFINITION: dict[str, Any] = {
 
 
 @dataclass
+class NemotronExactAssistantMessageFrame(DataFrame):
+    message: dict[str, Any]
+    batch_id: str | None = None
+
+
+@dataclass
+class InterruptedToolPassSignal:
+    replace_interrupted_tool_pass: bool = False
+
+
+@dataclass
 class ChatCompletionPassResult:
     output_text: str
     tool_calls: list[dict[str, Any]]
@@ -206,6 +221,284 @@ class NemotronOmniAudioLLMSettings(LLMSettings):
     chat_template_kwargs: dict[str, Any] | None | _NotGiven = field(
         default_factory=lambda: NOT_GIVEN
     )
+
+
+@dataclass
+class _NemotronProvisionalSyncToolPass:
+    assistant_message: dict[str, Any]
+    batch_id: str | None = None
+    assistant_row: dict[str, Any] | None = None
+    tool_rows_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    provisional_rows: list[dict[str, Any]] = field(default_factory=list)
+    pending_tool_call_ids: set[str] = field(default_factory=set)
+
+
+class NemotronAssistantAggregator(LLMAssistantAggregator):
+    def __init__(
+        self,
+        context: LLMContext,
+        *,
+        interrupted_tool_pass_signal: InterruptedToolPassSignal | None = None,
+        **kwargs,
+    ):
+        super().__init__(context, **kwargs)
+        self._interrupted_tool_pass_signal = interrupted_tool_pass_signal
+        self._pending_exact_assistant_message: dict[str, Any] | None = None
+        self._pending_exact_assistant_batch_id: str | None = None
+        self._current_exact_response_suppressed = False
+        self._active_exact_sync_pass: _NemotronProvisionalSyncToolPass | None = None
+        self._provisional_exact_sync_passes: list[_NemotronProvisionalSyncToolPass] = []
+        self._response_commit_candidates: list[_NemotronProvisionalSyncToolPass] = []
+        self._current_response_interrupted = False
+        self._current_response_had_error = False
+        self._suppress_interrupted_aggregation_commit = False
+
+    async def process_frame(self, frame: Frame, direction: FrameDirection):
+        if isinstance(frame, NemotronExactAssistantMessageFrame):
+            await self._handle_exact_assistant_message(frame)
+            return
+        if isinstance(frame, ErrorFrame):
+            self._current_response_had_error = True
+        await super().process_frame(frame, direction)
+
+    async def push_aggregation(self) -> str:
+        if not self._aggregation:
+            return ""
+        if not self._should_suppress_aggregation_commit():
+            return await super().push_aggregation()
+
+        aggregation = self.aggregation_string()
+        await super().reset()
+        return aggregation
+
+    async def _handle_exact_assistant_message(
+        self, frame: NemotronExactAssistantMessageFrame
+    ) -> None:
+        tool_calls = frame.message.get("tool_calls") or []
+        if not tool_calls:
+            return
+
+        pending_tool_call_ids = {
+            str(tool_call["id"])
+            for tool_call in tool_calls
+            if isinstance(tool_call, dict) and tool_call.get("id") is not None
+        }
+        exact_message = copy.deepcopy(frame.message)
+        self._pending_exact_assistant_message = exact_message
+        self._pending_exact_assistant_batch_id = frame.batch_id
+        self._current_exact_response_suppressed = True
+        self._active_exact_sync_pass = _NemotronProvisionalSyncToolPass(
+            assistant_message=copy.deepcopy(exact_message),
+            batch_id=frame.batch_id,
+            pending_tool_call_ids=pending_tool_call_ids,
+        )
+
+    async def _handle_llm_start(self, frame: LLMFullResponseStartFrame):
+        self._current_response_interrupted = False
+        self._current_response_had_error = False
+        self._response_commit_candidates = list(self._provisional_exact_sync_passes)
+        await super()._handle_llm_start(frame)
+
+    async def _handle_llm_end(self, frame: LLMFullResponseEndFrame):
+        try:
+            await super()._handle_llm_end(frame)
+        finally:
+            if not self._current_response_interrupted and not self._current_response_had_error:
+                self._commit_response_candidates()
+            self._response_commit_candidates = []
+            self._current_response_interrupted = False
+            self._current_response_had_error = False
+            self._current_exact_response_suppressed = False
+
+    async def _handle_function_call_in_progress(self, frame: FunctionCallInProgressFrame):
+        if not frame.cancel_on_interruption:
+            await super()._handle_function_call_in_progress(frame)
+            return
+
+        sync_pass = self._active_exact_sync_pass
+        if sync_pass is None or self._pending_exact_assistant_message is None:
+            logger.warning(
+                f"{self}: missing exact assistant message for sync tool call "
+                f"[{frame.function_name}:{frame.tool_call_id}]; falling back to stock path"
+            )
+            await super()._handle_function_call_in_progress(frame)
+            return
+
+        logger.debug(
+            f"{self} FunctionCallInProgressFrame: [{frame.function_name}:{frame.tool_call_id}]"
+        )
+        sync_pass.pending_tool_call_ids.add(frame.tool_call_id)
+        if sync_pass.assistant_row is None:
+            assistant_row = copy.deepcopy(sync_pass.assistant_message)
+            sync_pass.assistant_row = assistant_row
+            sync_pass.provisional_rows.append(assistant_row)
+            self._ensure_provisional_sync_pass(sync_pass)
+            self._context.add_message(assistant_row)
+            await self.push_frame(LLMContextAssistantTimestampFrame(timestamp=time_now_iso8601()))
+
+        if frame.tool_call_id not in sync_pass.tool_rows_by_id:
+            tool_row = {
+                "role": "tool",
+                "content": "IN_PROGRESS",
+                "tool_call_id": frame.tool_call_id,
+            }
+            sync_pass.tool_rows_by_id[frame.tool_call_id] = tool_row
+            sync_pass.provisional_rows.append(tool_row)
+            self._ensure_provisional_sync_pass(sync_pass)
+            self._context.add_message(tool_row)
+
+        self._function_calls_in_progress[frame.tool_call_id] = frame
+
+    async def _handle_function_call_result(self, frame: FunctionCallResultFrame):
+        in_progress_frame = self._function_calls_in_progress.get(frame.tool_call_id)
+        is_sync_exact = (
+            in_progress_frame is not None
+            and in_progress_frame.cancel_on_interruption
+            and self._find_provisional_sync_pass(frame.tool_call_id) is not None
+        )
+        is_final = frame.properties.is_final if frame.properties else True
+
+        await super()._handle_function_call_result(frame)
+
+        if not is_sync_exact or not is_final:
+            return
+
+        sync_pass = self._find_provisional_sync_pass(frame.tool_call_id)
+        if sync_pass is None:
+            return
+        sync_pass.pending_tool_call_ids.discard(frame.tool_call_id)
+        self._maybe_clear_active_exact_sync_pass(sync_pass)
+
+    async def _handle_function_call_cancel(self, frame: FunctionCallCancelFrame):
+        logger.debug(
+            f"{self} FunctionCallCancelFrame: [{frame.function_name}:{frame.tool_call_id}]"
+        )
+        function_call = self._function_calls_in_progress.get(frame.tool_call_id)
+        sync_pass = self._find_provisional_sync_pass(frame.tool_call_id)
+
+        if function_call is not None and not function_call.cancel_on_interruption:
+            await super()._handle_function_call_cancel(frame)
+            return
+
+        if frame.tool_call_id in self._function_calls_in_progress:
+            if sync_pass is None and function_call and function_call.cancel_on_interruption:
+                self._update_function_call_result(
+                    frame.function_name,
+                    frame.tool_call_id,
+                    "CANCELLED",
+                )
+            del self._function_calls_in_progress[frame.tool_call_id]
+
+        if sync_pass is None:
+            return
+
+        tool_row = sync_pass.tool_rows_by_id.pop(frame.tool_call_id, None)
+        if tool_row is not None:
+            self._remove_provisional_rows([tool_row])
+            if tool_row in sync_pass.provisional_rows:
+                sync_pass.provisional_rows.remove(tool_row)
+        sync_pass.pending_tool_call_ids.discard(frame.tool_call_id)
+        self._maybe_clear_active_exact_sync_pass(sync_pass)
+        # If every sync-tool row of this pass has now been cancelled (no live
+        # tool rows, nothing still pending), the provisional `assistant(tool_calls)`
+        # row is orphaned — a `tool_calls` row with no matching `tool` rows is an
+        # invalid transcript shape. Drop it and the pass. This covers the
+        # new-user-turn supersession path (step 3) that emits per-tool cancels
+        # without broadcasting an InterruptionFrame; the InterruptionFrame path
+        # already drops everything via `_drop_all_provisional_sync_tool_rows`.
+        # (If a *started* sibling already completed with a result before the rest
+        # were cancelled — only reachable via a new LLMContextFrame with no
+        # preceding InterruptionFrame, which this bot never produces — that
+        # surviving tool row keeps the assistant row, and the standard
+        # InterruptionFrame cleanup would still drop the whole pass.)
+        if not sync_pass.tool_rows_by_id and not sync_pass.pending_tool_call_ids:
+            leftover_rows = list(sync_pass.provisional_rows)
+            if leftover_rows:
+                self._remove_provisional_rows(leftover_rows)
+            sync_pass.provisional_rows.clear()
+            sync_pass.assistant_row = None
+            if sync_pass in self._provisional_exact_sync_passes:
+                self._provisional_exact_sync_passes.remove(sync_pass)
+
+    async def _handle_interruptions(self, frame: InterruptionFrame):
+        removed_rows = self._drop_all_provisional_sync_tool_rows()
+        if removed_rows and self._interrupted_tool_pass_signal is not None:
+            self._interrupted_tool_pass_signal.replace_interrupted_tool_pass = True
+
+        self._current_response_interrupted = True
+        self._suppress_interrupted_aggregation_commit = removed_rows
+        try:
+            await super()._handle_interruptions(frame)
+        finally:
+            self._suppress_interrupted_aggregation_commit = False
+            self._current_exact_response_suppressed = False
+            self._clear_active_exact_sync_pass_state()
+
+    def _should_suppress_aggregation_commit(self) -> bool:
+        return (
+            self._suppress_interrupted_aggregation_commit
+            or self._current_exact_response_suppressed
+        )
+
+    def _ensure_provisional_sync_pass(self, sync_pass: _NemotronProvisionalSyncToolPass) -> None:
+        if sync_pass not in self._provisional_exact_sync_passes:
+            self._provisional_exact_sync_passes.append(sync_pass)
+
+    def _find_provisional_sync_pass(
+        self, tool_call_id: str
+    ) -> _NemotronProvisionalSyncToolPass | None:
+        if (
+            self._active_exact_sync_pass is not None
+            and tool_call_id in self._active_exact_sync_pass.pending_tool_call_ids
+        ):
+            return self._active_exact_sync_pass
+        for sync_pass in self._provisional_exact_sync_passes:
+            if tool_call_id in sync_pass.tool_rows_by_id:
+                return sync_pass
+            if tool_call_id in sync_pass.pending_tool_call_ids:
+                return sync_pass
+        return None
+
+    def _commit_response_candidates(self) -> None:
+        for sync_pass in self._response_commit_candidates:
+            if sync_pass not in self._provisional_exact_sync_passes:
+                continue
+            self._provisional_exact_sync_passes.remove(sync_pass)
+            sync_pass.provisional_rows.clear()
+
+    def _drop_all_provisional_sync_tool_rows(self) -> bool:
+        rows_to_remove: list[dict[str, Any]] = []
+        for sync_pass in self._provisional_exact_sync_passes:
+            rows_to_remove.extend(sync_pass.provisional_rows)
+            sync_pass.provisional_rows.clear()
+            sync_pass.tool_rows_by_id.clear()
+            sync_pass.assistant_row = None
+        self._provisional_exact_sync_passes = []
+        if not rows_to_remove:
+            return False
+        self._remove_provisional_rows(rows_to_remove)
+        return True
+
+    def _remove_provisional_rows(self, rows: list[dict[str, Any]]) -> None:
+        if not rows:
+            return
+        self._context.transform_messages(
+            lambda messages: [message for message in messages if not any(message is row for row in rows)]
+        )
+
+    def _maybe_clear_active_exact_sync_pass(
+        self, sync_pass: _NemotronProvisionalSyncToolPass
+    ) -> None:
+        if self._active_exact_sync_pass is not sync_pass:
+            return
+        if sync_pass.pending_tool_call_ids:
+            return
+        self._clear_active_exact_sync_pass_state()
+
+    def _clear_active_exact_sync_pass_state(self) -> None:
+        self._active_exact_sync_pass = None
+        self._pending_exact_assistant_message = None
+        self._pending_exact_assistant_batch_id = None
 
 
 class NemotronOmniAudioLLMService(LLMService):
@@ -298,6 +591,7 @@ class NemotronOmniAudioLLMService(LLMService):
 
         self._session: aiohttp.ClientSession | None = None
         self._generation_task: asyncio.Task | None = None
+        self._round_limit_result_task: asyncio.Task | None = None
         self._current_turn_user_key: str | None = None
         self._current_turn_round_count = 0
         self._round_limit_closure_issued = False
@@ -345,12 +639,14 @@ class NemotronOmniAudioLLMService(LLMService):
     async def stop(self, frame: EndFrame):
         """Stop the service and close active HTTP resources."""
         await super().stop(frame)
+        await self._cancel_round_limit_result_task()
         await self._cancel_generation_task()
         await self._close_session()
 
     async def cancel(self, frame: CancelFrame):
         """Cancel the service and close active HTTP resources."""
         await super().cancel(frame)
+        await self._cancel_round_limit_result_task()
         await self._cancel_generation_task()
         await self._close_session()
 
@@ -376,6 +672,7 @@ class NemotronOmniAudioLLMService(LLMService):
                 # `_turn_tool_results` for the superseding turn and emit a stale
                 # run_llm=True followup that supersedes it.
                 self._mark_current_batch_stale()
+                await self._cancel_round_limit_result_task()
                 await self._cancel_generation_task()
                 if superseded_sync_batch:
                     await self._cancel_running_sync_function_calls()
@@ -396,10 +693,13 @@ class NemotronOmniAudioLLMService(LLMService):
                 await self.push_frame(frame, direction)
         elif isinstance(frame, InterruptionFrame):
             queued_cancellations = self._prepare_batch_supersession()
+            if self._generation_task:
+                self._generation_task.cancel()
+            await self.push_frame(frame, direction)
+            await self._cancel_round_limit_result_task()
             await self._cancel_generation_task()
             if queued_cancellations:
                 await self._broadcast_queued_function_call_cancellations(queued_cancellations)
-            await self.push_frame(frame, direction)
         elif isinstance(frame, LLMRunFrame):
             logger.debug(f"{self}: ignoring {frame.name}; LLMContextFrame triggers inference")
         else:
@@ -435,6 +735,11 @@ class NemotronOmniAudioLLMService(LLMService):
         if self._generation_task:
             await self.cancel_task(self._generation_task)
             self._generation_task = None
+
+    async def _cancel_round_limit_result_task(self):
+        if self._round_limit_result_task:
+            await self.cancel_task(self._round_limit_result_task)
+            self._round_limit_result_task = None
 
     async def _close_session(self):
         if self._session:
@@ -959,12 +1264,19 @@ class NemotronOmniAudioLLMService(LLMService):
         if result is None or not result.tool_calls:
             return
 
-        function_calls = self._function_calls_from_tool_calls(
+        function_calls, surviving_tool_calls = self._function_calls_from_tool_calls(
             result.tool_calls,
             context=context,
         )
         if not function_calls:
             return
+        # Build the exact assistant row from the SURVIVING tool calls only, so a
+        # dropped malformed call can't leave an assistant(tool_calls) row that
+        # names more ids than there will be tool rows for.
+        exact_assistant_message = self._build_exact_assistant_message(
+            result.output_text,
+            surviving_tool_calls,
+        )
 
         if self._round_limit_closure_issued:
             logger.warning(
@@ -979,9 +1291,15 @@ class NemotronOmniAudioLLMService(LLMService):
                 "synthesizing terminal tool results for closure pass"
             )
             self._round_limit_closure_issued = True
-            await self._emit_round_limit_results(function_calls)
+            await self._emit_round_limit_results(
+                function_calls,
+                exact_assistant_message=exact_assistant_message,
+            )
             return
 
+        await self.push_frame(
+            NemotronExactAssistantMessageFrame(message=copy.deepcopy(exact_assistant_message))
+        )
         await self.run_function_calls(function_calls)
 
     async def _run_completion_payload(
@@ -1141,8 +1459,19 @@ class NemotronOmniAudioLLMService(LLMService):
         tool_calls: list[dict[str, Any]],
         *,
         context: LLMContext,
-    ) -> list[FunctionCallFromLLM]:
+    ) -> tuple[list[FunctionCallFromLLM], list[dict[str, Any]]]:
+        """Build runnable items plus the surviving provider tool-call dicts.
+
+        Returns ``(function_calls, surviving_tool_calls)`` where ``surviving_tool_calls``
+        is the subset of the provider's ``tool_calls`` that produced a runnable item,
+        each guaranteed to carry a stable ``id`` matching the corresponding
+        ``FunctionCallFromLLM`` / ``tool`` row. The exact assistant row MUST be built
+        from ``surviving_tool_calls`` (not the raw ``tool_calls``) so a dropped malformed
+        call can never leave an ``assistant(tool_calls)`` row that names more ids than the
+        runner will produce ``tool`` rows for.
+        """
         function_calls: list[FunctionCallFromLLM] = []
+        surviving_tool_calls: list[dict[str, Any]] = []
         for index, tool_call in enumerate(tool_calls):
             function = tool_call.get("function") or {}
             function_name = function.get("name") or ""
@@ -1161,56 +1490,90 @@ class NemotronOmniAudioLLMService(LLMService):
                     "did not decode to an object"
                 )
                 continue
+            tool_call_id = tool_call.get("id") or f"call_{index}"
             function_calls.append(
                 FunctionCallFromLLM(
                     context=context,
-                    tool_call_id=tool_call.get("id") or f"call_{index}",
+                    tool_call_id=tool_call_id,
                     function_name=function_name,
                     arguments=arguments,
                 )
             )
-        return function_calls
+            surviving = copy.deepcopy(tool_call)
+            surviving["id"] = tool_call_id
+            surviving_tool_calls.append(surviving)
+        return function_calls, surviving_tool_calls
+
+    @staticmethod
+    def _build_exact_assistant_message(
+        output_text: str,
+        surviving_tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        return {
+            "role": "assistant",
+            "content": output_text,
+            "tool_calls": copy.deepcopy(surviving_tool_calls),
+        }
 
     async def _emit_round_limit_results(
         self,
         function_calls: list[FunctionCallFromLLM],
+        *,
+        exact_assistant_message: dict[str, Any],
     ) -> None:
         if not function_calls:
             return
 
+        await self.push_frame(
+            NemotronExactAssistantMessageFrame(message=copy.deepcopy(exact_assistant_message))
+        )
         await self._call_event_handler("on_function_calls_started", function_calls)
         await self.broadcast_frame(FunctionCallsStartedFrame, function_calls=function_calls)
+        await self._cancel_round_limit_result_task()
+        self._round_limit_result_task = self.create_task(
+            self._emit_round_limit_result_frames(function_calls),
+            name="nemotron_round_limit_result_frames",
+        )
 
-        for index, function_call in enumerate(function_calls):
-            await self.broadcast_frame(
-                FunctionCallInProgressFrame,
-                function_name=function_call.function_name,
-                tool_call_id=function_call.tool_call_id,
-                arguments=function_call.arguments,
-                cancel_on_interruption=True,
-                group_id=None,
-            )
-            result = self._build_bash_tool_result(
-                command=str(function_call.arguments.get("code") or ""),
-                command_started=False,
-                exit_code=None,
-                stdout_text="",
-                stderr_text="",
-                timed_out=False,
-                status_override="round_limit_reached",
-                summary_override=(
-                    "The per-user-turn sync tool round limit was reached. "
-                    "Do not call the tool again; answer from this observation."
-                ),
-            )
-            await self.broadcast_frame(
-                FunctionCallResultFrame,
-                function_name=function_call.function_name,
-                tool_call_id=function_call.tool_call_id,
-                arguments=function_call.arguments,
-                result=result,
-                run_llm=index == len(function_calls) - 1,
-            )
+    async def _emit_round_limit_result_frames(
+        self,
+        function_calls: list[FunctionCallFromLLM],
+    ) -> None:
+        try:
+            await self._await_generation_task_before_tool_followup()
+            for index, function_call in enumerate(function_calls):
+                await self.broadcast_frame(
+                    FunctionCallInProgressFrame,
+                    function_name=function_call.function_name,
+                    tool_call_id=function_call.tool_call_id,
+                    arguments=function_call.arguments,
+                    cancel_on_interruption=True,
+                    group_id=None,
+                )
+                result = self._build_bash_tool_result(
+                    command=str(function_call.arguments.get("code") or ""),
+                    command_started=False,
+                    exit_code=None,
+                    stdout_text="",
+                    stderr_text="",
+                    timed_out=False,
+                    status_override="round_limit_reached",
+                    summary_override=(
+                        "The per-user-turn sync tool round limit was reached. "
+                        "Do not call the tool again; answer from this observation."
+                    ),
+                )
+                await self.broadcast_frame(
+                    FunctionCallResultFrame,
+                    function_name=function_call.function_name,
+                    tool_call_id=function_call.tool_call_id,
+                    arguments=function_call.arguments,
+                    result=result,
+                    run_llm=index == len(function_calls) - 1,
+                )
+        finally:
+            if self._round_limit_result_task is asyncio.current_task():
+                self._round_limit_result_task = None
 
     @staticmethod
     def _merge_tool_call_delta(
