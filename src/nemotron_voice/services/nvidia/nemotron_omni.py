@@ -13,6 +13,7 @@ endpoint and streams text deltas back as Pipecat LLM frames.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import copy
 import hashlib
 import json
@@ -21,7 +22,7 @@ import re
 import shlex
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -45,7 +46,7 @@ from pipecat.frames.frames import (
 from pipecat.metrics.metrics import LLMTokenUsage
 from pipecat.processors.aggregators.llm_context import LLMContext, LLMSpecificMessage
 from pipecat.processors.frame_processor import FrameDirection
-from pipecat.services.llm_service import LLMService
+from pipecat.services.llm_service import FunctionCallParams, LLMService
 from pipecat.services.settings import NOT_GIVEN, LLMSettings, _NotGiven
 
 _TRACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
@@ -60,13 +61,17 @@ DEFAULT_VOICE_SYSTEM_INSTRUCTION = (
     "points, numbered lists, code blocks, tables, emojis, emoticons, decorative "
     "symbols, or special formatting. Avoid long lists. Do not mention these "
     "formatting rules unless asked. When you use a tool, treat the "
-    "latest tool result as ground truth. If the tool result contains stdout and "
-    "stderr sections, use both sections to answer. Some successful commands write "
-    "normal help or diagnostic text to stderr, so do not say a command is missing "
-    "just because useful output appears in stderr. The client separately displays "
-    "raw bash commands and raw terminal output, so do not read ASCII art, borders, "
-    "terminal markup, or long command output literally unless the user explicitly "
-    "asks you to. Interpret the result and explain the useful meaning briefly. "
+    "latest sync tool message as ground truth. Sync tool messages contain a JSON "
+    "observation object with keys ok, status, summary, command, exit_code, "
+    "timed_out, stdout, and stderr. Trust ok, status, exit_code, and timed_out. "
+    "Use stdout and stderr as evidence. Non-empty stderr with exit_code 0 is "
+    "normal evidence, not automatic failure. If status is duplicate_suppressed "
+    "or round_limit_reached, that is still ground truth, so answer from it and "
+    "do not re-call the tool. The client separately displays raw bash commands "
+    "and raw terminal output, so do not read ASCII art, borders, terminal markup, "
+    "or long command output literally unless the user explicitly asks you to. "
+    "Interpret the result and explain the useful meaning briefly instead of "
+    "reciting raw JSON. "
     "For cowthink or cowsay-style output, focus on the message inside the bubble "
     "and say that the command rendered it as ASCII art. Only use the bash tool "
     "when the user's latest request explicitly asks you to inspect or operate on "
@@ -87,9 +92,14 @@ DEFAULT_AUDIO_PROMPT = (
     "Listen to the audio and respond to the spoken instruction. If the user "
     "explicitly asks you to use the bash tool, run a command, inspect the local "
     "machine, or report command output, you must call run_bash and answer from "
-    "the tool result. Otherwise answer directly without tools unless local "
-    "inspection is genuinely needed. Never use bash just to echo or paraphrase "
-    "an answer you could say directly."
+    "the tool result. Sync tool messages contain a JSON observation object; "
+    "trust ok, status, exit_code, and timed_out, and use stdout and stderr as "
+    "evidence. Non-empty stderr with exit_code 0 is normal evidence, not "
+    "automatic failure. If status is duplicate_suppressed or round_limit_reached, "
+    "answer from that observation and do not re-call the tool. Explain the "
+    "meaning of the result instead of reciting raw JSON. Otherwise answer "
+    "directly without tools unless local inspection is genuinely needed. Never "
+    "use bash just to echo or paraphrase an answer you could say directly."
 )
 NEMOTRON_OMNI_INSTRUCT_DEFAULT_TEMPERATURE = 0.2
 NEMOTRON_OMNI_INSTRUCT_DEFAULT_MAX_TOKENS = 1024
@@ -100,18 +110,23 @@ BASH_TOOL_DEFINITION: dict[str, Any] = {
         "name": BASH_TOOL_NAME,
         "description": (
             "Execute arbitrary bash code in the local project workspace and return "
-            "the command output. If only stdout or only stderr has content, the "
-            "tool returns that content directly. If both streams have content, "
-            "stdout is wrapped in <stdout>...</stdout> and stderr is wrapped in "
-            "<stderr>...</stderr>. Some programs write normal help or diagnostic "
-            "text to stderr even when they succeed. Use this when the user asks "
-            "you to inspect or operate on the local machine. If the user "
-            "explicitly asks you to use bash, run a command, or report command "
-            "output, call this tool instead of answering from memory. Do not call "
-            "the exact same command again in the same assistant turn unless the "
-            "tool result shows that a rerun is required. Do not use this tool to "
-            "echo, printf, paraphrase, or draft natural-language answers that you "
-            "could say directly. Examples: use "
+            "a JSON observation object with exactly these fields: ok, status, "
+            "summary, command, exit_code, timed_out, stdout, stderr. Trust ok, "
+            "status, exit_code, and timed_out as ground truth, and use stdout and "
+            "stderr as supporting evidence. Non-empty stderr with exit_code 0 is "
+            "normal evidence, not automatic failure. Reserved status values that "
+            "can appear without re-running the command include "
+            "`duplicate_suppressed` (the exact same command was already run in "
+            "this assistant turn, so the prior result was reused) and "
+            "`round_limit_reached` (the tool-round budget was already exhausted, "
+            "so answer from that observation rather than calling again). Use this "
+            "when the user asks you to inspect or operate on the local machine. "
+            "If the user explicitly asks you to use bash, run a command, or report "
+            "command output, call this tool instead of answering from memory. Do "
+            "not call the exact same command again in the same assistant turn "
+            "unless the tool result shows that a rerun is required. Do not use "
+            "this tool to echo, printf, paraphrase, or draft natural-language "
+            "answers that you could say directly. Examples: use "
             "`git branch --show-current` to see the current git branch; use "
             "`find . -maxdepth 1 -type f | wc -l` to count files in this directory; "
             "use `find . -type f | wc -l` to count files total in this project."
@@ -262,6 +277,12 @@ class NemotronOmniAudioLLMService(LLMService):
         self._trace_dir = Path(trace_dir) if trace_dir else None
         self._trace_redact_audio = os.getenv("NEMOTRON_OMNI_TRACE_REDACT_AUDIO", "1") != "0"
         self._top_level_request_seq = 0
+        if self._enable_bash_tool:
+            self.register_function(
+                BASH_TOOL_NAME,
+                self._handle_run_bash_function_call,
+                cancel_on_interruption=True,
+            )
 
     def can_generate_metrics(self) -> bool:
         """Return whether the service emits processing, TTFB, and usage metrics."""
@@ -1092,14 +1113,15 @@ class NemotronOmniAudioLLMService(LLMService):
         self,
         tool_calls: list[dict[str, Any]],
         *,
-        seen_tool_results_by_signature: dict[tuple[str, str], str] | None = None,
+        seen_tool_results_by_signature: dict[tuple[str, str], dict[str, Any]] | None = None,
     ) -> list[dict[str, Any]]:
         tool_messages: list[dict[str, Any]] = []
         signature_results = seen_tool_results_by_signature or {}
         for tool_call in tool_calls:
             signature = self._tool_call_signature(tool_call)
             if signature and signature in signature_results:
-                result = self._duplicate_tool_result(signature_results[signature])
+                result_dict = self._duplicate_tool_result(signature_results[signature])
+                result = self._tool_result_json(result_dict)
                 logger.debug(
                     f"{self}: suppressing duplicate tool call within one user turn: "
                     f"{signature[0]} {signature[1]!r}"
@@ -1113,12 +1135,13 @@ class NemotronOmniAudioLLMService(LLMService):
                         "tool_call_id": tool_call.get("id") or "call_0",
                         "name": signature[0],
                         "signature": signature[1],
+                        "result": result_dict,
                     }
                 )
             else:
                 result = await self._execute_tool_call(tool_call)
                 if signature:
-                    signature_results[signature] = result
+                    signature_results[signature] = self._parse_tool_result_json(result)
             tool_messages.append(
                 {
                     "role": "tool",
@@ -1154,21 +1177,46 @@ class NemotronOmniAudioLLMService(LLMService):
         return name, normalized_code
 
     @staticmethod
-    def _duplicate_tool_result(previous_result: str) -> str:
-        return (
-            "[tool policy] Exact duplicate tool call suppressed. "
-            "Reuse the prior result below instead of calling the same command "
-            "again.\n"
-            f"{previous_result}"
+    def _duplicate_tool_result(previous_result: dict[str, Any]) -> dict[str, Any]:
+        reused_status = str(previous_result.get("status") or "unknown")
+        return {
+            "ok": bool(previous_result.get("ok")),
+            "status": "duplicate_suppressed",
+            "summary": (
+                "Exact duplicate command suppressed in this assistant turn. "
+                f"Reused the prior result instead of re-running it. Original status: "
+                f"{reused_status}."
+            ),
+            "command": str(previous_result.get("command") or ""),
+            "exit_code": previous_result.get("exit_code"),
+            "timed_out": bool(previous_result.get("timed_out")),
+            "stdout": str(previous_result.get("stdout") or ""),
+            "stderr": str(previous_result.get("stderr") or ""),
+        }
+
+    async def _handle_run_bash_function_call(self, params: FunctionCallParams) -> None:
+        result = await self._execute_bash_tool_request(
+            arguments=params.arguments,
+            tool_call_id=params.tool_call_id,
+            function_name=params.function_name,
         )
+        await params.result_callback(result)
 
     async def _execute_tool_call(self, tool_call: dict[str, Any]) -> str:
         function = tool_call.get("function") or {}
         name = function.get("name") or ""
         if name != BASH_TOOL_NAME:
             return self._tool_result_json(
-                ok=False,
-                error=f"Unsupported tool: {name!r}",
+                self._build_bash_tool_result(
+                    command="",
+                    command_started=False,
+                    exit_code=None,
+                    stdout_text="",
+                    stderr_text="",
+                    timed_out=False,
+                    status_override="unsupported_tool",
+                    summary_override=f"Unsupported tool: {name!r}",
+                )
             )
 
         arguments_text = function.get("arguments") or "{}"
@@ -1176,21 +1224,48 @@ class NemotronOmniAudioLLMService(LLMService):
             arguments = json.loads(arguments_text)
         except json.JSONDecodeError as exc:
             return self._tool_result_json(
-                ok=False,
-                error=f"Invalid JSON arguments: {exc}",
-                raw_arguments=arguments_text,
+                self._build_bash_tool_result(
+                    command="",
+                    command_started=False,
+                    exit_code=None,
+                    stdout_text="",
+                    stderr_text="",
+                    timed_out=False,
+                    status_override="invalid_arguments",
+                    summary_override=f"Invalid JSON arguments: {exc}",
+                )
+            )
+        result = await self._execute_bash_tool_request(
+            arguments=arguments,
+            tool_call_id=tool_call.get("id") or "call_0",
+            function_name=name,
+        )
+        return self._tool_result_json(result)
+
+    async def _execute_bash_tool_request(
+        self,
+        *,
+        arguments: Mapping[str, Any] | Any,
+        tool_call_id: str,
+        function_name: str,
+    ) -> dict[str, Any]:
+        code = arguments.get("code") if isinstance(arguments, Mapping) else None
+        if not isinstance(code, str) or not code.strip():
+            return self._build_bash_tool_result(
+                command=code if isinstance(code, str) else "",
+                command_started=False,
+                exit_code=None,
+                stdout_text="",
+                stderr_text="",
+                timed_out=False,
+                status_override="invalid_arguments",
+                summary_override="Missing required string argument: code",
             )
 
-        code = arguments.get("code")
-        if not isinstance(code, str) or not code.strip():
-            return self._tool_result_json(
-                ok=False,
-                error="Missing required string argument: code",
-                raw_arguments=arguments_text,
-            )
-        if self._is_prose_echo_command(code):
+        normalized_code = code.strip()
+        if self._is_prose_echo_command(normalized_code):
             logger.debug(
-                f"{self}: suppressing non-instrumental bash tool call: {code!r}"
+                f"{self}: suppressing non-instrumental bash tool call: {normalized_code!r}"
             )
             await self._send_bash_tool_event(
                 {
@@ -1198,18 +1273,28 @@ class NemotronOmniAudioLLMService(LLMService):
                     "guardrail_triggered": True,
                     "guardrail_kind": "non_instrumental_bash_tool_use",
                     "guardrail_reason": "echo_or_printf_prose",
-                    "tool_call_id": tool_call.get("id") or "call_0",
-                    "name": name,
-                    "code": code,
+                    "tool_call_id": tool_call_id,
+                    "name": function_name,
+                    "code": normalized_code,
                 }
             )
-            return (
-                "[tool policy] Do not use bash to echo, printf, or paraphrase an "
-                "answer you could say directly. The bash tool is only for real "
-                "command execution or explicit user-requested command output. "
-                "Answer the user directly without further tool use."
+            return self._build_bash_tool_result(
+                command=normalized_code,
+                command_started=False,
+                exit_code=None,
+                stdout_text="",
+                stderr_text="",
+                timed_out=False,
+                status_override="policy_rejected",
+                summary_override=(
+                    "Do not use bash to echo, printf, or paraphrase an answer you "
+                    "could say directly. The bash tool is only for real command "
+                    "execution or explicit user-requested command output. Answer "
+                    "the user directly without further tool use."
+                ),
             )
-        return await self._run_bash_tool(code, tool_call_id=tool_call.get("id") or "call_0")
+
+        return await self._run_bash_tool(normalized_code, tool_call_id=tool_call_id)
 
     @staticmethod
     def _is_prose_echo_command(code: str) -> bool:
@@ -1232,8 +1317,7 @@ class NemotronOmniAudioLLMService(LLMService):
         has_sentence_punctuation = any(char in payload_text for char in ".!,?:;")
         return word_count >= 12 or (word_count >= 8 and has_sentence_punctuation)
 
-    async def _run_bash_tool(self, code: str, *, tool_call_id: str) -> str:
-        started_at = time.perf_counter()
+    async def _run_bash_tool(self, code: str, *, tool_call_id: str) -> dict[str, Any]:
         logger.debug(
             f"{self}: running bash tool in {self._bash_tool_cwd!r}: {code!r}"
         )
@@ -1262,8 +1346,7 @@ class NemotronOmniAudioLLMService(LLMService):
                 stdout_text="",
                 stderr_text="",
                 timed_out=False,
-                elapsed_secs=time.perf_counter() - started_at,
-                error=f"Failed to start bash: {exc}",
+                summary_override=f"Failed to start bash: {exc}",
             )
             self._log_bash_tool_result(tool_call_id=tool_call_id, code=code, result=result)
             await self._send_bash_tool_event(
@@ -1275,18 +1358,9 @@ class NemotronOmniAudioLLMService(LLMService):
                     "result": result,
                 }
             )
-            return self._format_bash_tool_content(result)
+        return result
 
-        timed_out = False
-        try:
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(),
-                timeout=self._bash_tool_timeout_secs,
-            )
-        except asyncio.TimeoutError:
-            timed_out = True
-            process.kill()
-            stdout, stderr = await process.communicate()
+        stdout, stderr, timed_out = await self._communicate_bash_process(process)
 
         stdout_text = stdout.decode("utf-8", errors="replace")
         stderr_text = stderr.decode("utf-8", errors="replace")
@@ -1297,7 +1371,6 @@ class NemotronOmniAudioLLMService(LLMService):
             stdout_text=stdout_text,
             stderr_text=stderr_text,
             timed_out=timed_out,
-            elapsed_secs=time.perf_counter() - started_at,
         )
         self._log_bash_tool_result(tool_call_id=tool_call_id, code=code, result=result)
         await self._send_bash_tool_event(
@@ -1306,28 +1379,34 @@ class NemotronOmniAudioLLMService(LLMService):
                 "tool_call_id": tool_call_id,
                 "code": code,
                 "cwd": self._bash_tool_cwd,
-                "result": result,
-            }
-        )
-        return self._format_bash_tool_content(result)
+                    "result": result,
+                }
+            )
+        return result
 
-    def _format_bash_tool_content(self, result: dict[str, Any]) -> str:
-        stdout = str(result.get("stdout") or "")
-        stderr = str(result.get("stderr") or "")
-
-        if stdout and stderr:
-            return f"<stdout>{stdout}</stdout>\n<stderr>{stderr}</stderr>"
-        if stdout:
-            return stdout
-        if stderr:
-            return stderr
-
-        error = result.get("error")
-        if error:
-            return str(error)
-        if result.get("timed_out"):
-            return f"Command timed out after {self._bash_tool_timeout_secs:g} seconds."
-        return "Command completed with no output."
+    async def _communicate_bash_process(
+        self,
+        process: asyncio.subprocess.Process,
+    ) -> tuple[bytes, bytes, bool]:
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=self._bash_tool_timeout_secs,
+            )
+            return stdout, stderr, False
+        except asyncio.TimeoutError:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            stdout, stderr = await process.communicate()
+            return stdout, stderr, True
+        except asyncio.CancelledError:
+            if process.returncode is None:
+                with contextlib.suppress(ProcessLookupError):
+                    process.kill()
+            with contextlib.suppress(Exception):
+                await asyncio.shield(process.communicate())
+            raise
 
     def _build_bash_tool_result(
         self,
@@ -1338,15 +1417,19 @@ class NemotronOmniAudioLLMService(LLMService):
         stdout_text: str,
         stderr_text: str,
         timed_out: bool,
-        elapsed_secs: float,
-        error: str | None = None,
+        status_override: str | None = None,
+        summary_override: str | None = None,
+        ok_override: bool | None = None,
     ) -> dict[str, Any]:
         stdout_truncated = len(stdout_text) > self._bash_tool_max_output_chars
         stderr_truncated = len(stderr_text) > self._bash_tool_max_output_chars
         command_not_found = command_started and exit_code == 127
-        ok = command_started and exit_code == 0 and not timed_out and error is None
-
-        if ok:
+        if status_override is not None:
+            ok = ok_override if ok_override is not None else False
+            status = status_override
+            summary = summary_override or ""
+        elif command_started and exit_code == 0 and not timed_out:
+            ok = True
             status = "success"
             summary = "Command completed successfully."
             if stderr_text:
@@ -1354,58 +1437,48 @@ class NemotronOmniAudioLLMService(LLMService):
                     " The command wrote output to stderr, but exit_code is 0 so "
                     "that stderr output should not by itself be treated as failure."
                 )
-            assistant_guidance = (
-                "The command succeeded. Answer from stdout and stderr. Do not say "
-                "the command is missing or unrecognized."
-            )
         elif timed_out:
+            ok = False
             status = "timed_out"
             summary = f"Command timed out after {self._bash_tool_timeout_secs:g} seconds."
-            assistant_guidance = (
-                "The command timed out. Tell the user it did not finish and use any "
-                "captured stdout or stderr if relevant."
-            )
         elif not command_started:
+            ok = False
             status = "failed_to_start"
-            summary = error or "Command could not be started."
-            assistant_guidance = "Bash could not start. Tell the user the tool failed to run."
+            summary = summary_override or "Command could not be started."
         elif command_not_found:
+            ok = False
             status = "command_not_found"
             summary = "Command exited with 127, which usually means the shell could not find it."
-            assistant_guidance = "The command was not found. Tell the user it is missing or unavailable."
         else:
+            ok = False
             status = "nonzero_exit"
             summary = (
                 f"Command exited with status {exit_code}. Inspect stdout and stderr; "
                 "a nonzero exit code can still include useful command output."
             )
-            assistant_guidance = (
-                "The command ran but exited nonzero. Use stdout and stderr as the "
-                "result and mention the nonzero exit code if it matters."
+
+        if stdout_truncated or stderr_truncated:
+            truncated_parts: list[str] = []
+            if stdout_truncated:
+                truncated_parts.append("stdout")
+            if stderr_truncated:
+                truncated_parts.append("stderr")
+            summary += (
+                " Returned "
+                + " and ".join(truncated_parts)
+                + f" were truncated to {self._bash_tool_max_output_chars} chars."
             )
 
-        result: dict[str, Any] = {
-            "assistant_guidance": assistant_guidance,
-            "command": command,
+        return {
             "ok": ok,
             "status": status,
             "summary": summary,
-            "command_started": command_started,
-            "command_not_found": command_not_found,
+            "command": command,
             "exit_code": exit_code,
+            "timed_out": timed_out,
             "stdout": self._truncate_tool_output(stdout_text),
             "stderr": self._truncate_tool_output(stderr_text),
-            "stdout_chars": len(stdout_text),
-            "stderr_chars": len(stderr_text),
-            "stdout_truncated": stdout_truncated,
-            "stderr_truncated": stderr_truncated,
-            "timed_out": timed_out,
-            "elapsed_secs": round(elapsed_secs, 3),
-            "cwd": self._bash_tool_cwd,
         }
-        if error:
-            result["error"] = error
-        return result
 
     def _log_bash_tool_result(
         self,
@@ -1416,7 +1489,7 @@ class NemotronOmniAudioLLMService(LLMService):
     ) -> None:
         logger.debug(
             f"{self}: model-facing bash tool result for {tool_call_id} "
-            f"({code!r}): {self._tool_result_json(**result)}"
+            f"({code!r}): {self._tool_result_json(result)}"
         )
 
     async def _send_bash_tool_event(self, payload: dict[str, Any]) -> None:
@@ -1443,8 +1516,15 @@ class NemotronOmniAudioLLMService(LLMService):
         )
 
     @staticmethod
-    def _tool_result_json(**payload: Any) -> str:
+    def _tool_result_json(payload: dict[str, Any]) -> str:
         return json.dumps(payload, ensure_ascii=True)
+
+    @staticmethod
+    def _parse_tool_result_json(payload: str) -> dict[str, Any]:
+        parsed = json.loads(payload)
+        if not isinstance(parsed, dict):
+            raise ValueError("tool result JSON did not decode to an object")
+        return parsed
 
     async def _iter_sse_events(self, response: aiohttp.ClientResponse):
         buffer = ""

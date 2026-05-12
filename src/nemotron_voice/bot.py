@@ -6,17 +6,19 @@
 
 """SmallWebRTC bot for local Nemotron Omni audio-input testing."""
 
+from __future__ import annotations
+
+import copy
 import os
 import sys
 import uuid
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from dotenv import load_dotenv
 from loguru import logger
 
-from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
 from pipecat.audio.turn.base_turn_analyzer import BaseTurnAnalyzer, EndOfTurnState
-from pipecat.audio.vad.silero import SileroVADAnalyzer
 from pipecat.frames.frames import (
     CancelFrame,
     EndFrame,
@@ -53,10 +55,9 @@ from pipecat.processors.aggregators.llm_response_universal import (
 )
 from pipecat.processors.frame_processor import FrameDirection, FrameProcessor
 from pipecat.processors.frameworks.rtvi.processor import RTVIProcessor
-from pipecat.runner.types import RunnerArguments
-from pipecat.runner.utils import create_transport
-from nemotron_voice.services.kyutai.tts import PocketTTSService
+from pipecat.adapters.schemas.tools_schema import AdapterType, ToolsSchema
 from nemotron_voice.services.nvidia.nemotron_omni import (
+    BASH_TOOL_DEFINITION,
     DEFAULT_AUDIO_PROMPT,
     DEFAULT_VOICE_SYSTEM_INSTRUCTION,
     NEMOTRON_OMNI_INSTRUCT_DEFAULT_MAX_TOKENS,
@@ -64,13 +65,17 @@ from nemotron_voice.services.nvidia.nemotron_omni import (
     NEMOTRON_OMNI_INSTRUCT_DEFAULT_TOP_K,
     NemotronOmniAudioLLMService,
 )
-from nemotron_voice.services.nvidia.nemotron_speech import NemotronSpeechWebSocketSTTService
-from nemotron_voice.services.nvidia.nemotron_tts import NemotronMagpieWebSocketTTSService
-from pipecat.services.tts_service import TextAggregationMode
-from pipecat.transcriptions.language import Language
-from pipecat.transports.base_transport import BaseTransport, TransportParams
 from pipecat.turns.user_stop import BaseUserTurnStopStrategy
 from pipecat.turns.user_turn_strategies import UserTurnStrategies
+
+if TYPE_CHECKING:
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+    from pipecat.runner.types import RunnerArguments
+    from pipecat.transports.base_transport import BaseTransport
+    from nemotron_voice.services.kyutai.tts import PocketTTSService
+    from nemotron_voice.services.nvidia.nemotron_speech import NemotronSpeechWebSocketSTTService
+    from nemotron_voice.services.nvidia.nemotron_tts import NemotronMagpieWebSocketTTSService
 
 _FILE_LOGGER_ID: int | None = None
 _SYSTEM_INSTRUCTION_ENV = "NEMOTRON_OMNI_SYSTEM_INSTRUCTION"
@@ -101,12 +106,15 @@ _load_env()
 _configure_logging()
 
 
-transport_params = {
-    "webrtc": lambda: TransportParams(
-        audio_in_enabled=True,
-        audio_out_enabled=True,
-    ),
-}
+def _transport_params():
+    from pipecat.transports.base_transport import TransportParams
+
+    return {
+        "webrtc": lambda: TransportParams(
+            audio_in_enabled=True,
+            audio_out_enabled=True,
+        ),
+    }
 
 
 def _ensure_file_logging():
@@ -155,6 +163,10 @@ def _env_bool(name: str, default: bool) -> bool:
 
 
 def _build_nemotron_speech_stt(*, audio_passthrough: bool = False) -> NemotronSpeechWebSocketSTTService:
+    from pipecat.transcriptions.language import Language
+
+    from nemotron_voice.services.nvidia.nemotron_speech import NemotronSpeechWebSocketSTTService
+
     url = os.getenv("NEMOTRON_SPEECH_STT_URL", "ws://127.0.0.1:8080")
     logger.info(f"Using local Nemotron Speech WebSocket STT at {url}")
 
@@ -167,6 +179,10 @@ def _build_nemotron_speech_stt(*, audio_passthrough: bool = False) -> NemotronSp
 
 
 def _build_nemotron_magpie_tts() -> NemotronMagpieWebSocketTTSService:
+    from pipecat.services.tts_service import TextAggregationMode
+
+    from nemotron_voice.services.nvidia.nemotron_tts import NemotronMagpieWebSocketTTSService
+
     url = os.getenv("NEMOTRON_MAGPIE_TTS_URL", os.getenv("NVIDIA_TTS_URL", "http://127.0.0.1:8001"))
     voice = os.getenv("NEMOTRON_MAGPIE_TTS_VOICE", "aria")
     language = os.getenv("NEMOTRON_MAGPIE_TTS_LANGUAGE", "en")
@@ -186,6 +202,10 @@ def _build_nemotron_magpie_tts() -> NemotronMagpieWebSocketTTSService:
 
 
 def _build_pocket_tts() -> PocketTTSService:
+    from pipecat.services.tts_service import TextAggregationMode
+
+    from nemotron_voice.services.kyutai.tts import PocketTTSService
+
     url = os.getenv("POCKET_TTS_URL", os.getenv("KYUTAI_POCKET_TTS_URL", "http://127.0.0.1:8001"))
     voice = os.getenv("POCKET_TTS_VOICE", "alba")
     logger.info(f"Using local Kyutai Pocket TTS at {url} with voice {voice}")
@@ -370,7 +390,33 @@ class AudioOnlyLLMUserAggregator(LLMUserAggregator):
         return None
 
 
+def _build_llm_context(*, enable_bash_tool: bool) -> LLMContext:
+    if not enable_bash_tool:
+        return LLMContext()
+
+    # Intentional: advertise run_bash through custom_tools[OPENAI] so the
+    # provider sees the exact OpenAI tool dict, including
+    # parameters.additionalProperties=False, which standard_tools cannot
+    # encode. OpenAILLMAdapter.to_provider_tools_format appends
+    # custom_tools[OPENAI] verbatim. Standard-tools-only diagnostics such as
+    # LLMService._advertised_tool_names() and tool-change developer messages
+    # will not mention run_bash, which is acceptable here because this tool is
+    # static and gated by the same flag as handler registration.
+    return LLMContext(
+        tools=ToolsSchema(
+            standard_tools=[],
+            custom_tools={AdapterType.OPENAI: [copy.deepcopy(BASH_TOOL_DEFINITION)]},
+        ),
+        tool_choice="auto",
+    )
+
+
 async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
+    from pipecat.audio.turn.smart_turn.local_smart_turn_v3 import LocalSmartTurnAnalyzerV3
+    from pipecat.audio.vad.silero import SileroVADAnalyzer
+
+    from nemotron_voice.services.nvidia.nemotron_tts import NemotronMagpieWebSocketTTSService
+
     _ensure_file_logging()
     logger.info("Starting Nemotron Omni audio bot")
     conversation_cache_enabled = (
@@ -390,13 +436,14 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     async def send_bash_tool_event(payload: dict):
         await rtvi.send_server_message(payload)
 
+    enable_bash_tool = os.getenv("NEMOTRON_OMNI_ENABLE_BASH_TOOL", "1") != "0"
     llm = NemotronOmniAudioLLMService(
         base_url=os.getenv("NEMOTRON_OMNI_BASE_URL", "http://127.0.0.1:8000/v1"),
         conversation_id=conversation_id,
         suffix_only_conversation=(
             os.getenv("NEMOTRON_OMNI_SUFFIX_ONLY_CONVERSATION", "1") != "0"
         ),
-        enable_bash_tool=os.getenv("NEMOTRON_OMNI_ENABLE_BASH_TOOL", "1") != "0",
+        enable_bash_tool=enable_bash_tool,
         bash_tool_cwd=os.getenv("NEMOTRON_OMNI_BASH_TOOL_CWD", str(Path.cwd())),
         bash_tool_timeout_secs=float(os.getenv("NEMOTRON_OMNI_BASH_TOOL_TIMEOUT_SECS", "20")),
         bash_tool_max_output_chars=int(
@@ -428,7 +475,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     tts = _build_tts()
     stt = _build_nemotron_speech_stt(audio_passthrough=False)
 
-    context = LLMContext()
+    context = _build_llm_context(enable_bash_tool=enable_bash_tool)
     user_aggregator = AudioOnlyLLMUserAggregator(
         context,
         params=LLMUserAggregatorParams(
@@ -516,7 +563,9 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
 async def bot(runner_args: RunnerArguments):
     """Main bot entry point compatible with the Pipecat runner."""
-    transport = await create_transport(runner_args, transport_params)
+    from pipecat.runner.utils import create_transport
+
+    transport = await create_transport(runner_args, _transport_params())
     await run_bot(transport, runner_args)
 
 

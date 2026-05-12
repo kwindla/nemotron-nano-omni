@@ -25,7 +25,7 @@ Steps run in order; each is independently implementable and testable **except** 
 
 ## Steps
 
-- [ ] **1. Advertise the bash tool through `ToolsSchema`, switch the model-facing tool contract to structured JSON, and preserve the OpenAI-compatible request shape**
+- [x] **1. Advertise the bash tool through `ToolsSchema`, switch the model-facing tool contract to structured JSON, and preserve the OpenAI-compatible request shape**
 
   Set up the canonical Pipecat tool path **without** loosening the OpenAI-compatible request shape. The live `tools` payload must remain OpenAI-compatible and keep `parameters.additionalProperties = False`, but the model-facing bash tool contract moves in one cut to a fixed-field structured-JSON tool result rather than the current `<stdout>...</stdout>` / `<stderr>...</stderr>` text format.
 
@@ -316,7 +316,7 @@ Steps run in order; each is independently implementable and testable **except** 
 
 | # | Step | Status | Commit | Notes |
 |---|------|--------|--------|-------|
-| 1 | Advertise the bash tool through `ToolsSchema`; switch to structured-JSON tool results; preserve OpenAI-compatible request shape | pending | — | Includes the reserved `status` dedup value |
+| 1 | Advertise the bash tool through `ToolsSchema`; switch to structured-JSON tool results; preserve OpenAI-compatible request shape | done | _pending_ | 26 aligned/cache tests pass. `_build_bash_tool_result` now returns exactly the 8 fields; `_format_bash_tool_content` (tagged-text) deleted early; `_duplicate_tool_result` returns `status="duplicate_suppressed"`; handler registered `cancel_on_interruption=True`; internal loop now emits JSON tool content. Scope note: Codex also made `bot.py`'s transport/STT/TTS imports lazy (under `TYPE_CHECKING` + in-function) so the module imports cleanly for unit tests — kept (improves testability); reviewer moved `from __future__ import annotations` after the docstring. |
 | 2 | Service structural refactor: one inference per `LLMContextFrame`, backgrounded, adapter-normalized request, developer-role alignment | pending | — | Internal tool loop carried through unchanged; deleted in step 3 |
 | 3 | Replace the internal tool loop with Pipecat function-call re-entry + Nemotron-owned serial dispatch policy | pending | — | Includes the ParallelPipeline routing analysis; stock aggregator still owns context writes |
 | 4 | `NemotronAssistantAggregator`: exact provisional sync-tool rows in shared context, narrowly scoped | pending | — | Mixed-pass text-buffer suppression; single owner of the interrupted-tool-pass signal |

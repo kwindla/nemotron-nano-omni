@@ -335,9 +335,19 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_execute_tool_calls_includes_tool_name(self) -> None:
         service = self._make_service()
+        result_payload = {
+            "ok": True,
+            "status": "success",
+            "summary": "Command completed successfully.",
+            "command": "pwd",
+            "exit_code": 0,
+            "timed_out": False,
+            "stdout": "ok",
+            "stderr": "",
+        }
 
         async def fake_execute_tool_call(tool_call):
-            return "ok"
+            return json.dumps(result_payload)
 
         service._execute_tool_call = fake_execute_tool_call  # type: ignore[method-assign]
 
@@ -358,7 +368,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
                     "role": "tool",
                     "tool_call_id": "call_1",
                     "name": "run_bash",
-                    "content": "ok",
+                    "content": json.dumps(result_payload),
                 }
             ],
         )
@@ -367,11 +377,21 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         service = self._make_service()
         executed_codes: list[str] = []
         events: list[dict[str, object]] = []
+        result_payload = {
+            "ok": True,
+            "status": "success",
+            "summary": "Command completed successfully.",
+            "command": "pwd",
+            "exit_code": 0,
+            "timed_out": False,
+            "stdout": "tool result",
+            "stderr": "",
+        }
 
         async def fake_execute_tool_call(tool_call):
             arguments = tool_call["function"]["arguments"]
             executed_codes.append(arguments)
-            return "tool result"
+            return json.dumps(result_payload)
 
         async def capture_event(payload):
             events.append(payload)
@@ -398,9 +418,10 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(executed_codes, ['{"code":"pwd"}'])
-        self.assertEqual(tool_messages[0]["content"], "tool result")
-        self.assertIn("duplicate tool call suppressed", tool_messages[1]["content"])
-        self.assertIn("tool result", tool_messages[1]["content"])
+        self.assertEqual(json.loads(tool_messages[0]["content"]), result_payload)
+        duplicate_payload = json.loads(tool_messages[1]["content"])
+        self.assertEqual(duplicate_payload["status"], "duplicate_suppressed")
+        self.assertEqual(duplicate_payload["stdout"], "tool result")
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["phase"], "duplicate_suppressed")
         self.assertIs(events[0]["guardrail_triggered"], True)
@@ -414,7 +435,19 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         async def fake_execute_tool_call(tool_call):
             arguments = tool_call["function"]["arguments"]
             executed_codes.append(arguments)
-            return arguments
+            code = json.loads(arguments)["code"]
+            return json.dumps(
+                {
+                    "ok": True,
+                    "status": "success",
+                    "summary": "Command completed successfully.",
+                    "command": code,
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "stdout": code,
+                    "stderr": "",
+                }
+            )
 
         service._execute_tool_call = fake_execute_tool_call  # type: ignore[method-assign]
 
@@ -438,8 +471,8 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(executed_codes, ['{"code":"pwd"}', '{"code":"ls"}'])
         self.assertEqual(
-            [message["content"] for message in tool_messages],
-            ['{"code":"pwd"}', '{"code":"ls"}'],
+            [json.loads(message["content"])["command"] for message in tool_messages],
+            ["pwd", "ls"],
         )
 
     async def test_execute_tool_call_rejects_long_echo_prose(self) -> None:
@@ -455,7 +488,8 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         service._run_bash_tool = should_not_run_bash  # type: ignore[method-assign]
         service._bash_tool_event_sender = capture_event  # type: ignore[assignment]
 
-        result = await service._execute_tool_call(
+        result = json.loads(
+            await service._execute_tool_call(
             {
                 "id": "call_1",
                 "type": "function",
@@ -471,9 +505,11 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
                     ),
                 },
             }
+            )
         )
 
-        self.assertIn("Do not use bash to echo", result)
+        self.assertEqual(result["status"], "policy_rejected")
+        self.assertIn("Do not use bash to echo", result["summary"])
         self.assertEqual(len(events), 1)
         self.assertEqual(events[0]["phase"], "policy_rejected")
         self.assertIs(events[0]["guardrail_triggered"], True)
@@ -486,14 +522,25 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
     async def test_execute_tool_call_allows_short_echo_command(self) -> None:
         service = self._make_service()
         seen_calls: list[tuple[str, str]] = []
+        tool_result = {
+            "ok": True,
+            "status": "success",
+            "summary": "Command completed successfully.",
+            "command": "echo spark audio one",
+            "exit_code": 0,
+            "timed_out": False,
+            "stdout": "spark audio one\n",
+            "stderr": "",
+        }
 
-        async def fake_run_bash_tool(code: str, *, tool_call_id: str) -> str:
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str) -> dict[str, object]:
             seen_calls.append((code, tool_call_id))
-            return "ok"
+            return tool_result
 
         service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
 
-        result = await service._execute_tool_call(
+        result = json.loads(
+            await service._execute_tool_call(
             {
                 "id": "call_1",
                 "type": "function",
@@ -502,9 +549,10 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
                     "arguments": json.dumps({"code": "echo spark audio one"}),
                 },
             }
+            )
         )
 
-        self.assertEqual(result, "ok")
+        self.assertEqual(result, tool_result)
         self.assertEqual(seen_calls, [("echo spark audio one", "call_1")])
 
     def test_suffix_only_uses_latest_text_turn_after_audio_turn(self) -> None:
