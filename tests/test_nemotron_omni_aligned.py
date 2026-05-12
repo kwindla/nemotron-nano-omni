@@ -4,6 +4,7 @@ import copy
 import json
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 from typing import Any, Callable
 
@@ -43,6 +44,7 @@ from nemotron_voice.bot import (  # noqa: E402
 from nemotron_voice.services.nvidia.nemotron_omni import (  # noqa: E402
     BASH_TOOL_DEFINITION,
     ChatCompletionPassResult,
+    ConversationCacheMissError,
     DEFAULT_VOICE_SYSTEM_INSTRUCTION,
     InterruptedToolPassSignal,
     NemotronAssistantAggregator,
@@ -250,12 +252,17 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         enable_bash_tool: bool = True,
         system_instruction: str | None = DEFAULT_VOICE_SYSTEM_INSTRUCTION,
         bash_tool_max_rounds: int = 3,
+        conversation_id: str | None = None,
+        strip_historical_audio_from_payload: bool | None = None,
     ) -> NemotronOmniAudioLLMService:
         service = NemotronOmniAudioLLMService(
             enable_bash_tool=enable_bash_tool,
             bash_tool_max_rounds=bash_tool_max_rounds,
+            conversation_id=conversation_id,
         )
         service._settings.system_instruction = system_instruction
+        if strip_historical_audio_from_payload is not None:
+            service._strip_historical_audio_from_payload = strip_historical_audio_from_payload
 
         async def noop(*args, **kwargs):
             return None
@@ -274,6 +281,65 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         service.cancel_task = cancel_task  # type: ignore[method-assign]
         service._session = _DummySession()
         return service
+
+    def _normalized_full_messages(
+        self,
+        service: NemotronOmniAudioLLMService,
+        context: LLMContext,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        snapshot = service._normalized_request_snapshot(copy.deepcopy(context))
+        self.assertIsNotNone(snapshot)
+        assert snapshot is not None
+        full_messages = service._with_system_message(snapshot.messages)
+        if service._strip_historical_audio_from_payload:
+            full_messages = service._strip_historical_audio_from_messages(full_messages)
+        return snapshot, full_messages
+
+    def _expected_payload(
+        self,
+        service: NemotronOmniAudioLLMService,
+        *,
+        snapshot: Any,
+        messages: list[dict[str, Any]],
+        conversation_id: str | None,
+        require_cache: bool = False,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "model": service._settings.model,
+            "messages": copy.deepcopy(messages),
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "_cache_shape_fingerprint": snapshot.cache_shape_fingerprint,
+        }
+        if snapshot.tools is not None:
+            payload["tools"] = copy.deepcopy(snapshot.tools)
+            if snapshot.tool_choice is not None:
+                payload["tool_choice"] = copy.deepcopy(snapshot.tool_choice)
+        if conversation_id is not None:
+            payload["conversation_id"] = conversation_id
+            if require_cache:
+                payload["conversation_require_cache"] = True
+        if service._settings.max_tokens is not None:
+            payload["max_tokens"] = service._settings.max_tokens
+        if service._settings.temperature is not None:
+            payload["temperature"] = service._settings.temperature
+        if service._settings.top_p is not None:
+            payload["top_p"] = service._settings.top_p
+        if service._settings.top_k is not None:
+            payload["top_k"] = service._settings.top_k
+        if service._settings.frequency_penalty is not None:
+            payload["frequency_penalty"] = service._settings.frequency_penalty
+        if service._settings.presence_penalty is not None:
+            payload["presence_penalty"] = service._settings.presence_penalty
+        if service._settings.seed is not None:
+            payload["seed"] = service._settings.seed
+        if service._settings.chat_template_kwargs:
+            payload["chat_template_kwargs"] = copy.deepcopy(
+                service._settings.chat_template_kwargs
+            )
+        if service._settings.extra:
+            payload.update(copy.deepcopy(service._settings.extra))
+        return payload
 
     def _context_with_messages(
         self,
@@ -1661,6 +1727,899 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "assistant", "content": "Partial"},
                 {"role": "user", "content": "Second turn"},
             ],
+        )
+
+    async def test_cached_next_turn_payload_after_committed_turn_uses_assistant_plus_user_suffix_under_client_authoritative_protocol(
+        self,
+    ) -> None:
+        service = self._make_service(
+            enable_bash_tool=False,
+            system_instruction="sys",
+            conversation_id="conv-text",
+        )
+        context = self._context_with_messages(
+            [{"role": "user", "content": "First turn"}],
+            enable_bash_tool=False,
+        )
+        self._attach_assistant(service, context)
+        payloads: list[dict[str, Any]] = []
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                await service._push_llm_text("First answer")
+                return ChatCompletionPassResult(
+                    output_text="First answer",
+                    tool_calls=[],
+                    first_token=False,
+                )
+            await service._push_llm_text("Second answer")
+            return ChatCompletionPassResult(
+                output_text="Second answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        await self._run_context_frame(service, context)
+        self.assertEqual(
+            service.committed_messages,
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "First turn"},
+            ],
+        )
+
+        context.add_message({"role": "user", "content": "Second turn"})
+        await self._run_context_frame(service, context)
+
+        self.assertEqual(payloads[0]["conversation_id"], "conv-text")
+        self.assertNotIn("conversation_require_cache", payloads[0])
+        self.assertEqual(payloads[1]["conversation_id"], "conv-text")
+        self.assertIs(payloads[1]["conversation_require_cache"], True)
+        self.assertEqual(
+            payloads[1]["messages"],
+            [
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+        )
+        self.assertEqual(
+            service.committed_messages,
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "First turn"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+        )
+
+    async def test_tool_followup_suffix_payload_after_committed_tool_turn_uses_assistant_plus_tool_suffix_under_conversation_reuse(
+        self,
+    ) -> None:
+        service = self._make_service(
+            system_instruction="sys",
+            conversation_id="conv-tool",
+        )
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "Run pwd."}])
+        self._attach_assistant(service, context, auto_reenter=True)
+        payloads: list[dict[str, Any]] = []
+        tool_result = {
+            "ok": True,
+            "status": "success",
+            "summary": "Command completed successfully.",
+            "command": "pwd",
+            "exit_code": 0,
+            "timed_out": False,
+            "stdout": "/repo\n",
+            "stderr": "",
+        }
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                return ChatCompletionPassResult(
+                    output_text="Checking.",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            await service._push_llm_text("Done.")
+            return ChatCompletionPassResult(
+                output_text="Done.",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return copy.deepcopy(tool_result)
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len(payloads) == 2
+            and context.get_messages()[-1] == {"role": "assistant", "content": "Done."}
+        )
+
+        self.assertEqual(payloads[0]["conversation_id"], "conv-tool")
+        self.assertNotIn("conversation_require_cache", payloads[0])
+        self.assertEqual(payloads[1]["conversation_id"], "conv-tool")
+        self.assertIs(payloads[1]["conversation_require_cache"], True)
+        self.assertEqual(
+            payloads[1]["messages"],
+            [
+                {
+                    "role": "assistant",
+                    "content": "Checking.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": json.dumps(tool_result, ensure_ascii=True),
+                    "tool_call_id": "call_1",
+                },
+            ],
+        )
+        self.assertEqual(
+            service.committed_messages,
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "Run pwd."},
+                {
+                    "role": "assistant",
+                    "content": "Checking.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": json.dumps(tool_result, ensure_ascii=True),
+                    "tool_call_id": "call_1",
+                },
+            ],
+        )
+
+    async def test_interrupted_sync_tool_turn_preserves_conversation_id_with_append_only_user_suffix(
+        self,
+    ) -> None:
+        service = self._make_service(
+            system_instruction="sys",
+            conversation_id="conv-interrupt",
+        )
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "First turn"}])
+        signal = InterruptedToolPassSignal()
+        self._attach_assistant(
+            service,
+            context,
+            auto_reenter=True,
+            interrupted_tool_pass_signal=signal,
+        )
+        payloads: list[dict[str, Any]] = []
+        followup_started = asyncio.Event()
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            if len(payloads) == 2:
+                followup_started.set()
+                await asyncio.Future()
+            await service._push_llm_text("Second answer")
+            return ChatCompletionPassResult(
+                output_text="Second answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": "done",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "/repo\n",
+                "stderr": "",
+            }
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await followup_started.wait()
+        await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: signal.replace_interrupted_tool_pass
+            and context.get_messages() == [{"role": "user", "content": "First turn"}]
+        )
+
+        context.add_message({"role": "user", "content": "<user_interruption>Second turn"})
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len(payloads) == 3
+            and context.get_messages()[-1] == {"role": "assistant", "content": "Second answer"}
+        )
+
+        self.assertEqual(payloads[2]["conversation_id"], "conv-interrupt")
+        self.assertIs(payloads[2]["conversation_require_cache"], True)
+        self.assertEqual(
+            payloads[2]["messages"],
+            [{"role": "user", "content": "<user_interruption>Second turn"}],
+        )
+
+    async def test_cache_miss_rebuilds_from_full_history_not_suffix_and_rebases_same_conversation_id(
+        self,
+    ) -> None:
+        service = self._make_service(
+            enable_bash_tool=False,
+            system_instruction="sys",
+            conversation_id="conv-rebase",
+        )
+        context = self._context_with_messages(
+            [{"role": "user", "content": "First turn"}],
+            enable_bash_tool=False,
+        )
+        self._attach_assistant(service, context)
+        payloads: list[dict[str, Any]] = []
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                await service._push_llm_text("First answer")
+                return ChatCompletionPassResult(
+                    output_text="First answer",
+                    tool_calls=[],
+                    first_token=False,
+                )
+            if len(payloads) == 2:
+                raise ConversationCacheMissError("cache entry evicted")
+            await service._push_llm_text("Second answer")
+            return ChatCompletionPassResult(
+                output_text="Second answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        await self._run_context_frame(service, context)
+        context.add_message({"role": "user", "content": "Second turn"})
+        await self._run_context_frame(service, context)
+
+        self.assertEqual(
+            payloads[1]["messages"],
+            [
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+        )
+        self.assertEqual(payloads[1]["conversation_id"], "conv-rebase")
+        self.assertIs(payloads[1]["conversation_require_cache"], True)
+        self.assertEqual(
+            payloads[2]["messages"],
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "First turn"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+        )
+        self.assertEqual(payloads[2]["conversation_id"], "conv-rebase")
+        self.assertNotIn("conversation_require_cache", payloads[2])
+        self.assertEqual(
+            service.committed_messages,
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "First turn"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+        )
+        self.assertTrue(service._conversation_cache_committed)
+
+    async def test_non_append_rewrite_of_client_acknowledged_prefix_rotates_conversation_id(
+        self,
+    ) -> None:
+        service = self._make_service(
+            enable_bash_tool=False,
+            system_instruction="sys",
+            conversation_id="conv-rotate",
+        )
+        context = self._context_with_messages(
+            [{"role": "user", "content": "Original turn"}],
+            enable_bash_tool=False,
+        )
+        self._attach_assistant(service, context)
+        payloads: list[dict[str, Any]] = []
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                await service._push_llm_text("First answer")
+                return ChatCompletionPassResult(
+                    output_text="First answer",
+                    tool_calls=[],
+                    first_token=False,
+                )
+            await service._push_llm_text("Rotated answer")
+            return ChatCompletionPassResult(
+                output_text="Rotated answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        await self._run_context_frame(service, context)
+        service._turn_tool_results[("run_bash", "pwd")] = {"status": "success"}
+        context.get_messages()[0]["content"] = "Rewritten turn"
+        context.add_message({"role": "user", "content": "Second turn"})
+
+        with mock.patch(
+            "nemotron_voice.services.nvidia.nemotron_omni.uuid.uuid4",
+            return_value=mock.Mock(hex="rotated"),
+        ):
+            await self._run_context_frame(service, context)
+
+        self.assertEqual(payloads[1]["conversation_id"], "pipecat-rotated")
+        self.assertNotIn("conversation_require_cache", payloads[1])
+        self.assertEqual(
+            payloads[1]["messages"],
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "Rewritten turn"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+        )
+        self.assertEqual(service._conversation_id, "pipecat-rotated")
+        self.assertEqual(service._turn_tool_results, {})
+
+    async def test_tool_schema_or_tool_choice_change_rotates_conversation_id(self) -> None:
+        async def exercise_rotation(
+            *,
+            label: str,
+            mutate_context: Callable[[LLMContext], None],
+            rotated_hex: str,
+        ) -> None:
+            service = self._make_service(
+                system_instruction="sys",
+                conversation_id=f"conv-{label}",
+            )
+            context = self._context_with_messages([{"role": "user", "content": "First turn"}])
+            self._attach_assistant(service, context)
+            payloads: list[dict[str, Any]] = []
+
+            async def fake_stream(payload, **kwargs):
+                payloads.append(copy.deepcopy(payload))
+                if len(payloads) == 1:
+                    await service._push_llm_text("First answer")
+                    return ChatCompletionPassResult(
+                        output_text="First answer",
+                        tool_calls=[],
+                        first_token=False,
+                    )
+                await service._push_llm_text("Second answer")
+                return ChatCompletionPassResult(
+                    output_text="Second answer",
+                    tool_calls=[],
+                    first_token=False,
+                )
+
+            service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+            await self._run_context_frame(service, context)
+            mutate_context(context)
+            context.add_message({"role": "user", "content": "Second turn"})
+            with mock.patch(
+                "nemotron_voice.services.nvidia.nemotron_omni.uuid.uuid4",
+                return_value=mock.Mock(hex=rotated_hex),
+            ):
+                await self._run_context_frame(service, context)
+
+            self.assertEqual(payloads[1]["conversation_id"], f"pipecat-{rotated_hex}")
+            self.assertNotIn("conversation_require_cache", payloads[1])
+
+        await exercise_rotation(
+            label="tool-choice",
+            mutate_context=lambda context: context.set_tool_choice("required"),
+            rotated_hex="toolchoice",
+        )
+
+        def mutate_tool_schema(context: LLMContext) -> None:
+            tools = copy.deepcopy(context.tools)
+            assert isinstance(tools, ToolsSchema)
+            custom_tools = copy.deepcopy(tools.custom_tools or {})
+            custom_tools[AdapterType.OPENAI][0]["function"]["description"] = "Changed schema"
+            tools.custom_tools = custom_tools
+            context.set_tools(tools)
+
+        await exercise_rotation(
+            label="tool-schema",
+            mutate_context=mutate_tool_schema,
+            rotated_hex="toolschema",
+        )
+
+    async def test_chat_template_kwargs_or_prompt_shape_extra_change_rotates_conversation_id(
+        self,
+    ) -> None:
+        async def exercise_rotation(
+            *,
+            label: str,
+            mutate_settings: Callable[[NemotronOmniAudioLLMService], None],
+            rotated_hex: str,
+        ) -> None:
+            service = self._make_service(
+                enable_bash_tool=False,
+                system_instruction="sys",
+                conversation_id=f"conv-{label}",
+            )
+            context = self._context_with_messages(
+                [{"role": "user", "content": "First turn"}],
+                enable_bash_tool=False,
+            )
+            self._attach_assistant(service, context)
+            payloads: list[dict[str, Any]] = []
+
+            async def fake_stream(payload, **kwargs):
+                payloads.append(copy.deepcopy(payload))
+                if len(payloads) == 1:
+                    await service._push_llm_text("First answer")
+                    return ChatCompletionPassResult(
+                        output_text="First answer",
+                        tool_calls=[],
+                        first_token=False,
+                    )
+                await service._push_llm_text("Second answer")
+                return ChatCompletionPassResult(
+                    output_text="Second answer",
+                    tool_calls=[],
+                    first_token=False,
+                )
+
+            service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+            await self._run_context_frame(service, context)
+            mutate_settings(service)
+            context.add_message({"role": "user", "content": "Second turn"})
+            with mock.patch(
+                "nemotron_voice.services.nvidia.nemotron_omni.uuid.uuid4",
+                return_value=mock.Mock(hex=rotated_hex),
+            ):
+                await self._run_context_frame(service, context)
+
+            self.assertEqual(payloads[1]["conversation_id"], f"pipecat-{rotated_hex}")
+            self.assertNotIn("conversation_require_cache", payloads[1])
+
+        await exercise_rotation(
+            label="chat-template",
+            mutate_settings=lambda service: setattr(
+                service._settings,
+                "chat_template_kwargs",
+                {"enable_thinking": True},
+            ),
+            rotated_hex="chatshape",
+        )
+        await exercise_rotation(
+            label="extra-shape",
+            mutate_settings=lambda service: setattr(
+                service._settings,
+                "extra",
+                {"documents": [{"title": "Context", "text": "Prompt shape changed."}]},
+            ),
+            rotated_hex="extrashape",
+        )
+
+    async def test_cancelled_or_failed_request_does_not_advance_committed_messages(self) -> None:
+        async def prime_service(
+            *,
+            conversation_id: str,
+        ) -> tuple[NemotronOmniAudioLLMService, LLMContext]:
+            service = self._make_service(
+                enable_bash_tool=False,
+                system_instruction="sys",
+                conversation_id=conversation_id,
+            )
+            context = self._context_with_messages(
+                [{"role": "user", "content": "First turn"}],
+                enable_bash_tool=False,
+            )
+            self._attach_assistant(service, context)
+
+            async def first_turn(payload, **kwargs):
+                await service._push_llm_text("First answer")
+                return ChatCompletionPassResult(
+                    output_text="First answer",
+                    tool_calls=[],
+                    first_token=False,
+                )
+
+            service._stream_completion_pass = first_turn  # type: ignore[method-assign]
+            await self._run_context_frame(service, context)
+            return service, context
+
+        service, context = await prime_service(conversation_id="conv-fail")
+        committed_before_failure = copy.deepcopy(service.committed_messages)
+        context.add_message({"role": "user", "content": "Second turn"})
+
+        async def failing_stream(payload, **kwargs):
+            raise RuntimeError("boom")
+
+        service._stream_completion_pass = failing_stream  # type: ignore[method-assign]
+        await self._run_context_frame(service, context)
+        self.assertEqual(service.committed_messages, committed_before_failure)
+
+        service, context = await prime_service(conversation_id="conv-cancel")
+        committed_before_cancel = copy.deepcopy(service.committed_messages)
+        context.add_message({"role": "user", "content": "Second turn"})
+        started = asyncio.Event()
+
+        async def blocked_stream(payload, **kwargs):
+            started.set()
+            await asyncio.Future()
+
+        service._stream_completion_pass = blocked_stream  # type: ignore[method-assign]
+        task = asyncio.create_task(
+            service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        )
+        await started.wait()
+        await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        await task
+        self.assertEqual(service.committed_messages, committed_before_cancel)
+
+    async def test_prompt_shape_golden_cases(self) -> None:
+        bare_service = self._make_service(
+            enable_bash_tool=False,
+            system_instruction="sys",
+            conversation_id="conv-golden-bare",
+        )
+        bare_context = self._context_with_messages(
+            [{"role": "user", "content": "Bare turn"}],
+            enable_bash_tool=False,
+        )
+        self._attach_assistant(bare_service, bare_context)
+        bare_payloads: list[dict[str, Any]] = []
+
+        async def bare_stream(payload, **kwargs):
+            bare_payloads.append(copy.deepcopy(payload))
+            await bare_service._push_llm_text("Bare answer")
+            return ChatCompletionPassResult(
+                output_text="Bare answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        bare_service._stream_completion_pass = bare_stream  # type: ignore[method-assign]
+        await self._run_context_frame(bare_service, bare_context)
+        bare_snapshot, bare_full = self._normalized_full_messages(
+            bare_service,
+            self._context_with_messages(
+                [{"role": "user", "content": "Bare turn"}],
+                enable_bash_tool=False,
+            ),
+        )
+        self.assertEqual(
+            bare_payloads[0],
+            self._expected_payload(
+                bare_service,
+                snapshot=bare_snapshot,
+                messages=bare_full,
+                conversation_id="conv-golden-bare",
+                require_cache=False,
+            ),
+        )
+
+        cached_service = self._make_service(
+            enable_bash_tool=False,
+            system_instruction="sys",
+            conversation_id="conv-golden-cached",
+        )
+        cached_context = self._context_with_messages(
+            [{"role": "user", "content": "First turn"}],
+            enable_bash_tool=False,
+        )
+        self._attach_assistant(cached_service, cached_context)
+        cached_payloads: list[dict[str, Any]] = []
+
+        async def cached_stream(payload, **kwargs):
+            cached_payloads.append(copy.deepcopy(payload))
+            if len(cached_payloads) == 1:
+                await cached_service._push_llm_text("First answer")
+                return ChatCompletionPassResult(
+                    output_text="First answer",
+                    tool_calls=[],
+                    first_token=False,
+                )
+            await cached_service._push_llm_text("Second answer")
+            return ChatCompletionPassResult(
+                output_text="Second answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        cached_service._stream_completion_pass = cached_stream  # type: ignore[method-assign]
+        await self._run_context_frame(cached_service, cached_context)
+        cached_context.add_message({"role": "user", "content": "Second turn"})
+        expected_cached_context = self._context_with_messages(
+            [
+                {"role": "user", "content": "First turn"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+            enable_bash_tool=False,
+        )
+        cached_snapshot, expected_cached_full = self._normalized_full_messages(
+            cached_service,
+            expected_cached_context,
+        )
+        await self._run_context_frame(cached_service, cached_context)
+        self.assertEqual(
+            cached_payloads[1],
+            self._expected_payload(
+                cached_service,
+                snapshot=cached_snapshot,
+                messages=expected_cached_full[-2:],
+                conversation_id="conv-golden-cached",
+                require_cache=True,
+            ),
+        )
+
+        tool_service = self._make_service(
+            system_instruction="sys",
+            conversation_id="conv-golden-tool",
+        )
+        await self._prime_service_for_tools(tool_service)
+        tool_context = self._context_with_messages([{"role": "user", "content": "Run pwd."}])
+        self._attach_assistant(tool_service, tool_context, auto_reenter=True)
+        tool_payloads: list[dict[str, Any]] = []
+        tool_result = {
+            "ok": True,
+            "status": "success",
+            "summary": "Command completed successfully.",
+            "command": "pwd",
+            "exit_code": 0,
+            "timed_out": False,
+            "stdout": "/repo\n",
+            "stderr": "",
+        }
+
+        async def tool_stream(payload, **kwargs):
+            tool_payloads.append(copy.deepcopy(payload))
+            if len(tool_payloads) == 1:
+                return ChatCompletionPassResult(
+                    output_text="Checking.",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            await tool_service._push_llm_text("Done.")
+            return ChatCompletionPassResult(
+                output_text="Done.",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        async def run_tool(code: str, *, tool_call_id: str):
+            return copy.deepcopy(tool_result)
+
+        tool_service._stream_completion_pass = tool_stream  # type: ignore[method-assign]
+        tool_service._run_bash_tool = run_tool  # type: ignore[method-assign]
+        await tool_service.process_frame(LLMContextFrame(tool_context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len(tool_payloads) == 2
+            and tool_context.get_messages()[-1] == {"role": "assistant", "content": "Done."}
+        )
+        expected_tool_context = self._context_with_messages(
+            [
+                {"role": "user", "content": "Run pwd."},
+                {
+                    "role": "assistant",
+                    "content": "Checking.",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "content": json.dumps(tool_result, ensure_ascii=True),
+                    "tool_call_id": "call_1",
+                },
+            ]
+        )
+        tool_snapshot, expected_tool_full = self._normalized_full_messages(
+            tool_service,
+            expected_tool_context,
+        )
+        self.assertEqual(
+            tool_payloads[1],
+            self._expected_payload(
+                tool_service,
+                snapshot=tool_snapshot,
+                messages=expected_tool_full[-2:],
+                conversation_id="conv-golden-tool",
+                require_cache=True,
+            ),
+        )
+
+        interrupted_service = self._make_service(
+            system_instruction="sys",
+            conversation_id="conv-golden-interrupt",
+        )
+        await self._prime_service_for_tools(interrupted_service)
+        interrupted_context = self._context_with_messages(
+            [{"role": "user", "content": "First turn"}]
+        )
+        interrupted_signal = InterruptedToolPassSignal()
+        self._attach_assistant(
+            interrupted_service,
+            interrupted_context,
+            auto_reenter=True,
+            interrupted_tool_pass_signal=interrupted_signal,
+        )
+        interrupted_payloads: list[dict[str, Any]] = []
+        interrupted_followup_started = asyncio.Event()
+
+        async def interrupted_stream(payload, **kwargs):
+            interrupted_payloads.append(copy.deepcopy(payload))
+            if len(interrupted_payloads) == 1:
+                return ChatCompletionPassResult(
+                    output_text="",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            if len(interrupted_payloads) == 2:
+                interrupted_followup_started.set()
+                await asyncio.Future()
+            await interrupted_service._push_llm_text("Second answer")
+            return ChatCompletionPassResult(
+                output_text="Second answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        async def interrupted_run_tool(code: str, *, tool_call_id: str):
+            return copy.deepcopy(tool_result)
+
+        interrupted_service._stream_completion_pass = interrupted_stream  # type: ignore[method-assign]
+        interrupted_service._run_bash_tool = interrupted_run_tool  # type: ignore[method-assign]
+        await interrupted_service.process_frame(
+            LLMContextFrame(interrupted_context),
+            FrameDirection.DOWNSTREAM,
+        )
+        await interrupted_followup_started.wait()
+        await interrupted_service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: interrupted_signal.replace_interrupted_tool_pass
+            and interrupted_context.get_messages() == [{"role": "user", "content": "First turn"}]
+        )
+        interrupted_context.add_message(
+            {"role": "user", "content": "<user_interruption>Second turn"}
+        )
+        expected_interrupted_context = self._context_with_messages(
+            [
+                {"role": "user", "content": "First turn"},
+                {"role": "user", "content": "<user_interruption>Second turn"},
+            ]
+        )
+        interrupted_snapshot, expected_interrupted_full = self._normalized_full_messages(
+            interrupted_service,
+            expected_interrupted_context,
+        )
+        await interrupted_service.process_frame(
+            LLMContextFrame(interrupted_context),
+            FrameDirection.DOWNSTREAM,
+        )
+        await self._wait_until(
+            lambda: len(interrupted_payloads) == 3
+            and interrupted_context.get_messages()[-1]
+            == {"role": "assistant", "content": "Second answer"}
+        )
+        self.assertEqual(
+            interrupted_payloads[2],
+            self._expected_payload(
+                interrupted_service,
+                snapshot=interrupted_snapshot,
+                messages=expected_interrupted_full[-1:],
+                conversation_id="conv-golden-interrupt",
+                require_cache=True,
+            ),
+        )
+
+        rebase_service = self._make_service(
+            enable_bash_tool=False,
+            system_instruction="sys",
+            conversation_id="conv-golden-rebase",
+        )
+        rebase_context = self._context_with_messages(
+            [{"role": "user", "content": "First turn"}],
+            enable_bash_tool=False,
+        )
+        self._attach_assistant(rebase_service, rebase_context)
+        rebase_payloads: list[dict[str, Any]] = []
+
+        async def rebase_stream(payload, **kwargs):
+            rebase_payloads.append(copy.deepcopy(payload))
+            if len(rebase_payloads) == 1:
+                await rebase_service._push_llm_text("First answer")
+                return ChatCompletionPassResult(
+                    output_text="First answer",
+                    tool_calls=[],
+                    first_token=False,
+                )
+            if len(rebase_payloads) == 2:
+                raise ConversationCacheMissError("cache miss")
+            await rebase_service._push_llm_text("Second answer")
+            return ChatCompletionPassResult(
+                output_text="Second answer",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        rebase_service._stream_completion_pass = rebase_stream  # type: ignore[method-assign]
+        await self._run_context_frame(rebase_service, rebase_context)
+        rebase_context.add_message({"role": "user", "content": "Second turn"})
+        expected_rebase_context = self._context_with_messages(
+            [
+                {"role": "user", "content": "First turn"},
+                {"role": "assistant", "content": "First answer"},
+                {"role": "user", "content": "Second turn"},
+            ],
+            enable_bash_tool=False,
+        )
+        rebase_snapshot, expected_rebase_full = self._normalized_full_messages(
+            rebase_service,
+            expected_rebase_context,
+        )
+        await self._run_context_frame(rebase_service, rebase_context)
+        self.assertEqual(
+            rebase_payloads[2],
+            self._expected_payload(
+                rebase_service,
+                snapshot=rebase_snapshot,
+                messages=expected_rebase_full,
+                conversation_id="conv-golden-rebase",
+                require_cache=False,
+            ),
         )
 
     async def test_duplicate_bash_call_dedup_persists_across_committed_tool_followup_reentry_within_one_user_turn(

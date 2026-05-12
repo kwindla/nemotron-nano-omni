@@ -42,6 +42,12 @@ class _FakeProcess:
 
 
 class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
+    """Helper coverage for conversation-cache-related service behavior.
+
+    Integration scenarios for suffix projection, rotation, and rebase live in
+    ``tests/test_nemotron_omni_aligned.py``.
+    """
+
     def _make_service(
         self,
         *,
@@ -66,6 +72,34 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         service._push_llm_text = noop  # type: ignore[method-assign]
         service._session = object()
         return service
+
+    def test_historical_audio_stripping_defaults_to_disabled(self) -> None:
+        # OFF by default: stripping is relative to the latest user row, so it
+        # would make `committed_messages` non-monotonic and rotate the cache
+        # every turn. Cross-turn prefix reuse requires the un-stripped transcript.
+        service = NemotronOmniAudioLLMService(enable_bash_tool=True)
+        self.assertFalse(service._strip_historical_audio_from_payload)
+
+    def test_is_conversation_cache_miss_only_for_409_with_that_error_type(self) -> None:
+        cls = NemotronOmniAudioLLMService
+        self.assertTrue(
+            cls._is_conversation_cache_miss(
+                409, '{"error": {"type": "ConversationCacheMissError", "message": "evicted"}}'
+            )
+        )
+        # wrong status
+        self.assertFalse(
+            cls._is_conversation_cache_miss(
+                400, '{"error": {"type": "ConversationCacheMissError"}}'
+            )
+        )
+        # 409 but a different error type
+        self.assertFalse(
+            cls._is_conversation_cache_miss(409, '{"error": {"type": "SomethingElse"}}')
+        )
+        # 409 with non-JSON / non-dict error body
+        self.assertFalse(cls._is_conversation_cache_miss(409, "not json"))
+        self.assertFalse(cls._is_conversation_cache_miss(409, '{"error": "string"}'))
 
     def test_messages_for_adapter_boundary_uses_openai_llm_specific_id(self) -> None:
         service = self._make_service()

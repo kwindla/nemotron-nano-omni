@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -420,6 +421,17 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
 
     _ensure_file_logging()
     logger.info("Starting Nemotron Omni audio bot")
+    conversation_cache_enabled = (
+        os.getenv("NEMOTRON_OMNI_ENABLE_CONVERSATION_CACHE", "1") != "0"
+    )
+    if conversation_cache_enabled:
+        conversation_id = os.getenv("NEMOTRON_OMNI_CONVERSATION_ID") or (
+            f"pipecat-{uuid.uuid4().hex}"
+        )
+        logger.info(f"Using Nemotron Omni conversation_id={conversation_id}")
+    else:
+        conversation_id = None
+        logger.info("Nemotron Omni conversation cache disabled for this bot session")
     rtvi = RTVIProcessor()
 
     async def send_bash_tool_event(payload: dict):
@@ -428,6 +440,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
     enable_bash_tool = os.getenv("NEMOTRON_OMNI_ENABLE_BASH_TOOL", "1") != "0"
     llm = NemotronOmniAudioLLMService(
         base_url=os.getenv("NEMOTRON_OMNI_BASE_URL", "http://127.0.0.1:8000/v1"),
+        conversation_id=conversation_id,
         enable_bash_tool=enable_bash_tool,
         bash_tool_cwd=os.getenv("NEMOTRON_OMNI_BASH_TOOL_CWD", str(Path.cwd())),
         bash_tool_timeout_secs=float(os.getenv("NEMOTRON_OMNI_BASH_TOOL_TIMEOUT_SECS", "20")),

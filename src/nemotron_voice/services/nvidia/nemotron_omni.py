@@ -68,6 +68,20 @@ from pipecat.utils.time import time_now_iso8601
 
 _TRACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
 
+# Request fields the service owns; `settings.extra` must not override these.
+_RESERVED_PAYLOAD_KEYS = frozenset(
+    {
+        "model",
+        "messages",
+        "stream",
+        "stream_options",
+        "conversation_id",
+        "conversation_require_cache",
+        "tools",
+        "tool_choice",
+    }
+)
+
 DEFAULT_VOICE_SYSTEM_INSTRUCTION = (
     "You are a helpful voice assistant. Respond in plain text only. Keep answers "
     "brief, direct, and conversational, usually one or two short sentences. Your "
@@ -179,6 +193,10 @@ class ChatCompletionPassResult:
     output_text: str
     tool_calls: list[dict[str, Any]]
     first_token: bool
+
+
+class ConversationCacheMissError(RuntimeError):
+    pass
 
 
 @dataclass
@@ -521,6 +539,7 @@ class NemotronOmniAudioLLMService(LLMService):
         model: str | None = None,
         settings: Settings | None = None,
         audio_passthrough: bool = False,
+        conversation_id: str | None = None,
         request_timeout_secs: float = 180.0,
         enable_bash_tool: bool = False,
         bash_tool_cwd: str | None = None,
@@ -538,6 +557,8 @@ class NemotronOmniAudioLLMService(LLMService):
             model: Model name exposed by vLLM.
             settings: Runtime-updatable LLM settings.
             audio_passthrough: Whether to pass input audio frames downstream.
+            conversation_id: Optional stable id sent to vLLM for
+                client-authoritative conversation-cache reuse.
             request_timeout_secs: Total HTTP timeout for one streamed request.
             enable_bash_tool: Whether to expose the local ``run_bash`` tool.
             bash_tool_cwd: Working directory for bash tool calls.
@@ -578,6 +599,10 @@ class NemotronOmniAudioLLMService(LLMService):
         self._base_url = base_url.rstrip("/")
         self._chat_completions_url = f"{self._base_url}/chat/completions"
         self._audio_passthrough = audio_passthrough
+        self._conversation_id = conversation_id
+        self._conversation_cache_committed = False
+        self.committed_messages: list[dict[str, Any]] = []
+        self._committed_cache_shape_fingerprint: str | None = None
         self._request_timeout_secs = request_timeout_secs
         self._enable_bash_tool = enable_bash_tool
         self._bash_tool_cwd = bash_tool_cwd or os.getcwd()
@@ -585,6 +610,17 @@ class NemotronOmniAudioLLMService(LLMService):
         self._bash_tool_max_output_chars = bash_tool_max_output_chars
         self._bash_tool_max_rounds = bash_tool_max_rounds
         self._bash_tool_event_sender = bash_tool_event_sender
+        # Default OFF. The plan (step 5) called for flipping this on, but that
+        # premise was wrong: historical-audio stripping is computed *relative to
+        # the latest user row*, so a user row that was kept (with audio) in the
+        # turn where it was latest gets stripped in every later turn — which
+        # makes `committed_messages` (a snapshot of one turn's transcript) never
+        # a prefix of a later turn's transcript, so the cache rotates every turn
+        # and cross-turn prefix reuse is lost entirely. With stripping OFF the
+        # transcript is monotonic, the committed prefix matches, suffix
+        # projection works, and the historical audio is processed once and then
+        # served from the engine's prefix cache. Set to "1" only if you also
+        # disable conversation caching (no `conversation_id`).
         self._strip_historical_audio_from_payload = (
             os.getenv("NEMOTRON_OMNI_STRIP_HISTORICAL_AUDIO_FROM_PAYLOAD", "0") != "0"
         )
@@ -939,7 +975,11 @@ class NemotronOmniAudioLLMService(LLMService):
         provider_tools: list[dict[str, Any]] | None,
         provider_tool_choice: Any | None,
     ) -> str:
-        prompt_shape: dict[str, Any] = {}
+        # `model` is part of cache-attach semantics — the engine checkpoint is
+        # rendered with the model's tokenizer + chat template, so a model change
+        # must rotate the conversation_id (an append-only suffix under the old id
+        # would otherwise look cache-compatible).
+        prompt_shape: dict[str, Any] = {"model": self._settings.model}
         if provider_tools is not None:
             prompt_shape["tools"] = copy.deepcopy(provider_tools)
         if provider_tool_choice is not None:
@@ -987,21 +1027,53 @@ class NemotronOmniAudioLLMService(LLMService):
         self,
         snapshot: NormalizedRequestSnapshot,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]] | None:
-        full_messages = self._with_system_message(snapshot.messages)
-        if not full_messages or self._latest_user_turn_key_from_messages(full_messages) is None:
+        current_full = self._with_system_message(snapshot.messages)
+        if self._strip_historical_audio_from_payload:
+            current_full = self._strip_historical_audio_from_messages(current_full)
+        if not current_full or self._latest_user_turn_key_from_messages(current_full) is None:
             logger.debug(f"{self}: ignoring LLM context without a latest user message")
             return None
 
-        full_messages = copy.deepcopy(full_messages)
-        if self._strip_historical_audio_from_payload:
-            full_messages = self._strip_historical_audio_from_messages(full_messages)
+        request_messages = copy.deepcopy(current_full)
+        if self._conversation_id is not None:
+            committed_prefix_matches = current_full[: len(self.committed_messages)] == self.committed_messages
+            fingerprint_changed = (
+                self._conversation_cache_committed
+                and self._committed_cache_shape_fingerprint is not None
+                and snapshot.cache_shape_fingerprint != self._committed_cache_shape_fingerprint
+            )
+            non_append_rewrite = self._conversation_cache_committed and not committed_prefix_matches
+
+            if fingerprint_changed or non_append_rewrite:
+                rotation_reason = (
+                    "cache-shape change"
+                    if fingerprint_changed
+                    else "non-append committed-prefix rewrite"
+                )
+                self._rotate_conversation_cache_projection(reason=rotation_reason)
+                request_messages = copy.deepcopy(current_full)
+            elif (
+                self._conversation_cache_committed
+                and self._committed_cache_shape_fingerprint == snapshot.cache_shape_fingerprint
+                and committed_prefix_matches
+            ):
+                request_messages = copy.deepcopy(current_full[len(self.committed_messages) :])
+
         payload: dict[str, Any] = {
             "model": self._settings.model,
-            "messages": copy.deepcopy(full_messages),
+            "messages": request_messages,
             "stream": True,
             "stream_options": {"include_usage": True},
             "_cache_shape_fingerprint": snapshot.cache_shape_fingerprint,
         }
+        if self._conversation_id is not None:
+            payload["conversation_id"] = self._conversation_id
+            if (
+                self._conversation_cache_committed
+                and self._committed_cache_shape_fingerprint == snapshot.cache_shape_fingerprint
+                and current_full[: len(self.committed_messages)] == self.committed_messages
+            ):
+                payload["conversation_require_cache"] = True
         if snapshot.tools is not None:
             payload["tools"] = copy.deepcopy(snapshot.tools)
             if snapshot.tool_choice is not None:
@@ -1025,9 +1097,37 @@ class NemotronOmniAudioLLMService(LLMService):
             payload["chat_template_kwargs"] = self._settings.chat_template_kwargs
 
         if self._settings.extra:
-            payload.update(self._settings.extra)
+            # `extra` carries model-specific knobs; it must not be allowed to
+            # clobber the protocol-owned fields (messages / conversation_id /
+            # conversation_require_cache / tools / tool_choice / model / stream),
+            # because doing so would silently desync the cache contract while
+            # `_process_context` still promotes `committed_messages` as if the
+            # original transcript went over the wire.
+            for key, value in self._settings.extra.items():
+                if key in _RESERVED_PAYLOAD_KEYS:
+                    logger.warning(
+                        f"{self}: ignoring reserved key {key!r} in settings.extra; "
+                        "it would override a protocol-owned request field"
+                    )
+                    continue
+                payload[key] = value
 
-        return payload, full_messages
+        return payload, copy.deepcopy(current_full)
+
+    def _rotate_conversation_cache_projection(self, *, reason: str) -> None:
+        if self._conversation_id is None:
+            return
+
+        old_conversation_id = self._conversation_id
+        self._conversation_id = f"pipecat-{uuid.uuid4().hex}"
+        self._conversation_cache_committed = False
+        self.committed_messages = []
+        self._committed_cache_shape_fingerprint = None
+        self._turn_tool_results = {}
+        logger.info(
+            f"{self}: rotating conversation_id from {old_conversation_id} "
+            f"to {self._conversation_id} after {reason}"
+        )
 
     def _strip_historical_audio_from_messages(
         self,
@@ -1178,8 +1278,9 @@ class NemotronOmniAudioLLMService(LLMService):
         return [system_message, *normalized_messages]
 
     def _trace_request_id(self, top_level_request_seq: int, attempt_num: int) -> str:
+        conversation_part = self._conversation_id or "no-conversation"
         return (
-            f"nemotron-no-conversation-turn-{top_level_request_seq:03d}-"
+            f"nemotron-{conversation_part}-turn-{top_level_request_seq:03d}-"
             f"attempt-{attempt_num:02d}"
         )
 
@@ -1261,7 +1362,13 @@ class NemotronOmniAudioLLMService(LLMService):
             ),
             start_ttfb=True,
         )
-        if result is None or not result.tool_calls:
+        if result is None:
+            return
+        if self._conversation_id is not None:
+            self.committed_messages = copy.deepcopy(full_messages)
+            self._conversation_cache_committed = True
+            self._committed_cache_shape_fingerprint = snapshot.cache_shape_fingerprint
+        if not result.tool_calls:
             return
 
         function_calls, surviving_tool_calls = self._function_calls_from_tool_calls(
@@ -1326,33 +1433,65 @@ class NemotronOmniAudioLLMService(LLMService):
                 timeout = aiohttp.ClientTimeout(total=self._request_timeout_secs)
                 self._session = aiohttp.ClientSession(timeout=timeout)
 
-            logger.debug(f"{self}: sending {request_description}")
-            trace_id = self._trace_request_id(top_level_request_seq, 1)
-            attempt_messages = payload.get("messages")
-            if not isinstance(attempt_messages, list):
-                attempt_messages = []
-            logger.debug(
-                f"{self}: completion attempt 1 "
-                f"messages={len(attempt_messages)} "
-                f"roles={self._message_role_summary(attempt_messages)} "
-                f"audio_parts={self._count_audio_parts(attempt_messages)}"
+            cache_info = (
+                f" with conversation_id={self._conversation_id}"
+                if self._conversation_id
+                else ""
             )
-            self._write_trace_file(
-                trace_id=trace_id,
-                phase="client-request",
-                payload={
-                    "request_description": request_description,
-                    "messages_role_summary": self._message_role_summary(attempt_messages),
-                    "http_payload": self._http_payload(payload),
-                    "conversation_full_messages": full_messages,
-                },
-            )
-            result = await self._stream_completion_pass(
-                payload,
-                headers={**headers, "X-Request-Id": trace_id},
-                first_token=True,
-                trace_id=trace_id,
-            )
+            logger.debug(f"{self}: sending {request_description}{cache_info}")
+            current_payload = copy.deepcopy(payload)
+            retried_after_cache_miss = False
+            first_token = True
+            attempt_num = 0
+            while True:
+                attempt_num += 1
+                trace_id = self._trace_request_id(top_level_request_seq, attempt_num)
+                attempt_messages = current_payload.get("messages")
+                if not isinstance(attempt_messages, list):
+                    attempt_messages = []
+                logger.debug(
+                    f"{self}: completion attempt {attempt_num} "
+                    f"messages={len(attempt_messages)} "
+                    f"roles={self._message_role_summary(attempt_messages)} "
+                    f"audio_parts={self._count_audio_parts(attempt_messages)} "
+                    f"require_cache={bool(current_payload.get('conversation_require_cache'))}"
+                )
+                self._write_trace_file(
+                    trace_id=trace_id,
+                    phase="client-request",
+                    payload={
+                        "request_description": request_description,
+                        "conversation_id": current_payload.get("conversation_id"),
+                        "conversation_cache_committed": self._conversation_cache_committed,
+                        "committed_messages": self.committed_messages,
+                        "committed_cache_shape_fingerprint": self._committed_cache_shape_fingerprint,
+                        "messages_role_summary": self._message_role_summary(attempt_messages),
+                        "http_payload": self._http_payload(current_payload),
+                        "conversation_full_messages": full_messages,
+                    },
+                )
+                try:
+                    result = await self._stream_completion_pass(
+                        current_payload,
+                        headers={**headers, "X-Request-Id": trace_id},
+                        first_token=first_token,
+                        trace_id=trace_id,
+                    )
+                except ConversationCacheMissError:
+                    if retried_after_cache_miss:
+                        raise
+                    current_payload = self._build_cache_rebase_payload(
+                        payload=current_payload,
+                        full_messages=full_messages,
+                    )
+                    retried_after_cache_miss = True
+                    logger.info(
+                        f"{self}: conversation cache miss for "
+                        f"{self._conversation_id}; retrying with full context"
+                    )
+                    continue
+                first_token = result.first_token
+                break
             logger.debug(
                 f"{self}: completed response in {time.perf_counter() - started_at:.3f}s: "
                 f"{result.output_text!r}"
@@ -1392,6 +1531,8 @@ class NemotronOmniAudioLLMService(LLMService):
                         "response_text": error_text,
                     },
                 )
+                if self._is_conversation_cache_miss(response.status, error_text):
+                    raise ConversationCacheMissError(error_text)
                 raise RuntimeError(
                     f"vLLM request failed with {response.status}: {error_text}"
                 )
@@ -1453,6 +1594,30 @@ class NemotronOmniAudioLLMService(LLMService):
             for key, value in payload.items()
             if not key.startswith("_")
         }
+
+    @staticmethod
+    def _is_conversation_cache_miss(status: int, error_text: str) -> bool:
+        if status != 409:
+            return False
+        try:
+            data = json.loads(error_text)
+        except json.JSONDecodeError:
+            return False
+        error = data.get("error")
+        if not isinstance(error, dict):
+            return False
+        return error.get("type") == "ConversationCacheMissError"
+
+    def _build_cache_rebase_payload(
+        self,
+        *,
+        payload: dict[str, Any],
+        full_messages: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        retry_payload = copy.deepcopy(payload)
+        retry_payload["messages"] = copy.deepcopy(full_messages)
+        retry_payload.pop("conversation_require_cache", None)
+        return retry_payload
 
     def _function_calls_from_tool_calls(
         self,

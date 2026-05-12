@@ -1,0 +1,236 @@
+[2026-05-12T22:49:21.174Z] Starting Codex Task.
+[2026-05-12T22:49:23.606Z] Starting Codex task thread.
+[2026-05-12T22:49:24.173Z] Thread ready (019e1e61-75a5-70d2-9837-d4aa642cb98e).
+[2026-05-12T22:49:24.198Z] Turn started (019e1e61-75e1-7c21-b1bc-7c089f3606a0).
+[2026-05-12T22:49:41.569Z] Assistant message captured: Reading step 5 in the plan and the current service/tests first. I’m checking the exact contra...
+
+[2026-05-12T22:49:41.569Z] Assistant message
+Reading step 5 in the plan and the current service/tests first. I’m checking the exact contract, then I’ll patch the client projection logic and update the targeted tests around the new suffix/rebase/rotation behavior.
+[2026-05-12T22:49:41.616Z] Running command: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-12T22:49:41.634Z] Running command: /bin/bash -lc "sed -n '1,260p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:49:41.634Z] Command completed: /bin/bash -lc "sed -n '1,260p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:49:41.634Z] Command completed: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-12T22:49:41.784Z] Running command: /bin/bash -lc "sed -n '1,260p' src/nemotron_voice/bot.py"
+[2026-05-12T22:49:41.785Z] Command completed: /bin/bash -lc "sed -n '1,260p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-12T22:49:41.794Z] Running command: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T22:49:41.813Z] Command completed: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T22:49:41.813Z] Running command: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_conversation_cache.py"
+[2026-05-12T22:49:41.813Z] Command completed: /bin/bash -lc "sed -n '1,260p' tests/test_nemotron_omni_conversation_cache.py" (exit 0)
+[2026-05-12T22:49:41.823Z] Running command: /bin/bash -lc 'git log --oneline -n 12'
+[2026-05-12T22:49:41.841Z] Command completed: /bin/bash -lc 'git log --oneline -n 12' (exit 0)
+[2026-05-12T22:49:56.830Z] Assistant message captured: I’ve got the step-5 contract and current step-4 code loaded. Next I’m reading the rest of `ne...
+
+[2026-05-12T22:49:56.830Z] Assistant message
+I’ve got the step-5 contract and current step-4 code loaded. Next I’m reading the rest of `nemotron_omni.py` around request building, cache-miss handling, and the existing aligned/cache assertions so the rewrite lands without regressing step-4 behavior.
+[2026-05-12T22:49:56.871Z] Running command: /bin/bash -lc 'rg -n "class ConversationCacheMissError|def _normalized_request_snapshot|def _...
+[2026-05-12T22:49:56.871Z] Command completed: /bin/bash -lc 'rg -n "class ConversationCacheMissError|def _normalized_request_snapshot|def _... (exit 0)
+[2026-05-12T22:49:56.878Z] Running command: /bin/bash -lc "sed -n '260,760p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:49:56.879Z] Command completed: /bin/bash -lc "sed -n '260,760p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:49:56.886Z] Running command: /bin/bash -lc "sed -n '760,1320p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:49:56.886Z] Command completed: /bin/bash -lc "sed -n '760,1320p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:49:56.896Z] Running command: /bin/bash -lc 'rg -n "test_cached_next_turn|tool_followup|conversation_id|committed_messages|...
+[2026-05-12T22:49:56.913Z] Command completed: /bin/bash -lc 'rg -n "test_cached_next_turn|tool_followup|conversation_id|committed_messages|... (exit 0)
+[2026-05-12T22:49:56.913Z] Running command: /bin/bash -lc "rg -n \"## Steps|\\*\\*2\\.|\\*\\*5\\.|5\\.6|client-authoritative|lineage\" pr...
+[2026-05-12T22:49:56.930Z] Command completed: /bin/bash -lc "rg -n \"## Steps|\\*\\*2\\.|\\*\\*5\\.|5\\.6|client-authoritative|lineage\" pr... (exit 0)
+[2026-05-12T22:50:08.107Z] Assistant message captured: I’ve confirmed the current build path is still the step-3/4 no-cache version. I’m reading the...
+
+[2026-05-12T22:50:08.107Z] Assistant message
+I’ve confirmed the current build path is still the step-3/4 no-cache version. I’m reading the streamer and the existing aligned cases around interrupted text/tool followups now, because those assertions need to shift onto the new committed-prefix projection rather than full-history payloads.
+[2026-05-12T22:50:08.157Z] Running command: /bin/bash -lc "sed -n '1320,1880p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:50:08.157Z] Command completed: /bin/bash -lc "sed -n '1320,1880p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:50:08.316Z] Running command: /bin/bash -lc "sed -n '1880,2200p' src/nemotron_voice/services/nvidia/nemotron_omni.py"
+[2026-05-12T22:50:08.316Z] Command completed: /bin/bash -lc "sed -n '1880,2200p' src/nemotron_voice/services/nvidia/nemotron_omni.py" (exit 0)
+[2026-05-12T22:50:08.322Z] Running command: /bin/bash -lc "sed -n '900,1800p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T22:50:08.339Z] Command completed: /bin/bash -lc "sed -n '900,1800p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T22:50:08.340Z] Running command: /bin/bash -lc "sed -n '1800,2300p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T22:50:08.340Z] Command completed: /bin/bash -lc "sed -n '1800,2300p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T22:50:08.340Z] Running command: /bin/bash -lc "sed -n '240,520p' tests/test_nemotron_omni_conversation_cache.py"
+[2026-05-12T22:50:08.340Z] Command completed: /bin/bash -lc "sed -n '240,520p' tests/test_nemotron_omni_conversation_cache.py" (exit 0)
+[2026-05-12T22:50:08.340Z] Running command: /bin/bash -lc "sed -n '446,520p' proj-nemotron-pipecat-assistant-aggregator-alignment.md"
+[2026-05-12T22:50:08.357Z] Command completed: /bin/bash -lc "sed -n '446,520p' proj-nemotron-pipecat-assistant-aggregator-alignment.md" (exit 0)
+[2026-05-12T22:50:16.696Z] Running command: /bin/bash -lc "rg -n \"_build_llm_context|NemotronOmniAudioLLMService\\(|enable_conversation_...
+[2026-05-12T22:50:16.696Z] Command completed: /bin/bash -lc "rg -n \"_build_llm_context|NemotronOmniAudioLLMService\\(|enable_conversation_... (exit 0)
+[2026-05-12T22:50:16.700Z] Running command: /bin/bash -lc "sed -n '260,520p' src/nemotron_voice/bot.py"
+[2026-05-12T22:50:16.700Z] Command completed: /bin/bash -lc "sed -n '260,520p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-12T22:50:16.863Z] Running command: /bin/bash -lc "sed -n '520,860p' src/nemotron_voice/bot.py"
+[2026-05-12T22:50:16.863Z] Command completed: /bin/bash -lc "sed -n '520,860p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-12T22:50:30.310Z] Assistant message captured: I’m checking the pre-step-3 version for the deleted cache-miss exception and the old bot wiri...
+
+[2026-05-12T22:50:30.311Z] Assistant message
+I’m checking the pre-step-3 version for the deleted cache-miss exception and the old bot wiring, only to recover the pieces the plan explicitly says to reintroduce. The new projection itself will still be implemented fresh over the normalized snapshot.
+[2026-05-12T22:50:30.348Z] Running command: /bin/bash -lc 'git show 17b3713:src/nemotron_voice/services/nvidia/nemotron_omni.py | rg -n "...
+[2026-05-12T22:50:30.349Z] Command completed: /bin/bash -lc 'git show 17b3713:src/nemotron_voice/services/nvidia/nemotron_omni.py | rg -n "... (exit 0)
+[2026-05-12T22:50:30.516Z] Running command: /bin/bash -lc "git show 17b3713:src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n ...
+[2026-05-12T22:50:30.517Z] Command completed: /bin/bash -lc "git show 17b3713:src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n ... (exit 0)
+[2026-05-12T22:50:30.530Z] Running command: /bin/bash -lc "git show 17b3713:src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n ...
+[2026-05-12T22:50:30.530Z] Command completed: /bin/bash -lc "git show 17b3713:src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n ... (exit 0)
+[2026-05-12T22:50:30.533Z] Running command: /bin/bash -lc "git show 17b3713:src/nemotron_voice/bot.py | rg -n \"conversation|ENABLE_CONVE...
+[2026-05-12T22:50:30.534Z] Command completed: /bin/bash -lc "git show 17b3713:src/nemotron_voice/bot.py | rg -n \"conversation|ENABLE_CONVE... (exit 0)
+[2026-05-12T22:50:30.537Z] Running command: /bin/bash -lc "git show 17b3713:src/nemotron_voice/bot.py | sed -n '410,470p'"
+[2026-05-12T22:50:30.537Z] Command completed: /bin/bash -lc "git show 17b3713:src/nemotron_voice/bot.py | sed -n '410,470p'" (exit 0)
+[2026-05-12T22:50:37.636Z] Assistant message captured: I’ve got the old cache-miss detection and bot env wiring. Next I’m patching the service state...
+
+[2026-05-12T22:50:37.636Z] Assistant message
+I’ve got the old cache-miss detection and bot env wiring. Next I’m patching the service state and request projection first, then I’ll rework the cache-focused tests to assert on suffix/rebase/rotation at the payload layer.
+[2026-05-12T22:50:37.674Z] Running command: /bin/bash -lc "sed -n '220,420p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T22:50:37.692Z] Command completed: /bin/bash -lc "sed -n '220,420p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T22:50:37.692Z] Running command: /bin/bash -lc "sed -n '420,900p' tests/test_nemotron_omni_aligned.py"
+[2026-05-12T22:50:37.692Z] Command completed: /bin/bash -lc "sed -n '420,900p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-12T22:50:37.838Z] Running command: /bin/bash -lc "sed -n '220,260p' tests/test_nemotron_omni_conversation_cache.py"
+[2026-05-12T22:50:37.839Z] Command completed: /bin/bash -lc "sed -n '220,260p' tests/test_nemotron_omni_conversation_cache.py" (exit 0)
+[2026-05-12T22:53:57.062Z] Running command: /bin/bash -lc "git show 17b3713:src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n ...
+[2026-05-12T22:53:57.081Z] Command completed: /bin/bash -lc "git show 17b3713:src/nemotron_voice/services/nvidia/nemotron_omni.py | sed -n ... (exit 0)
+[2026-05-12T22:54:07.316Z] Assistant message captured: I’m editing the service now. The patch is going to add the new `conversation_id`/`committed_m...
+
+[2026-05-12T22:54:07.316Z] Assistant message
+I’m editing the service now. The patch is going to add the new `conversation_id`/`committed_messages` state, the committed-prefix projection with rotate/rebase handling, and the one-shot cache-miss retry path, while keeping the step-4 tool dispatch and shared-context behavior intact.
+[2026-05-12T22:54:36.715Z] Applying 1 file change(s).
+[2026-05-12T22:54:36.733Z] File changes completed.
+[2026-05-12T22:54:55.104Z] Applying 1 file change(s).
+[2026-05-12T22:54:55.105Z] File changes completed.
+[2026-05-12T22:55:02.611Z] Applying 1 file change(s).
+[2026-05-12T22:55:02.613Z] File changes completed.
+[2026-05-12T22:55:34.401Z] Applying 1 file change(s).
+[2026-05-12T22:55:34.402Z] File changes completed.
+[2026-05-12T22:55:51.447Z] Assistant message captured: I’ve landed the service-side projection and retry plumbing. I’m wiring the bot env back to `c...
+
+[2026-05-12T22:55:51.447Z] Assistant message
+I’ve landed the service-side projection and retry plumbing. I’m wiring the bot env back to `conversation_id` now, then I’ll turn to the payload assertions and the new cache-contract tests.
+[2026-05-12T22:56:00.178Z] Applying 1 file change(s).
+[2026-05-12T22:56:00.179Z] File changes completed.
+[2026-05-12T22:56:15.422Z] Assistant message captured: I’m expanding the aligned test harness so I can exercise the new contract with and without a ...
+
+[2026-05-12T22:56:15.422Z] Assistant message
+I’m expanding the aligned test harness so I can exercise the new contract with and without a `conversation_id`, and so the expected payloads are derived from the normalized transcript rather than from raw context rows.
+[2026-05-12T22:56:32.581Z] Applying 1 file change(s).
+[2026-05-12T22:56:32.582Z] File changes completed.
+[2026-05-12T22:56:39.359Z] Applying 1 file change(s).
+[2026-05-12T22:56:39.361Z] File changes completed.
+[2026-05-12T22:58:00.942Z] Assistant message captured: I’m adding the cache-contract scenarios to `test_nemotron_omni_aligned.py` now: ordinary cach...
+
+[2026-05-12T22:58:00.942Z] Assistant message
+I’m adding the cache-contract scenarios to `test_nemotron_omni_aligned.py` now: ordinary cached turns, tool followups, interrupted sync-tool reuse, miss→rebase, rotation triggers, failure/cancellation, and exact golden payloads.
+[2026-05-12T23:00:26.346Z] Applying 1 file change(s).
+[2026-05-12T23:00:26.348Z] File changes completed.
+[2026-05-12T23:00:42.910Z] Assistant message captured: The aligned scenarios are in. I’m doing a pass over the new service/test code now for obvious...
+
+[2026-05-12T23:00:42.911Z] Assistant message
+The aligned scenarios are in. I’m doing a pass over the new service/test code now for obvious mismatches before I run the targeted test files, then I’ll fix whatever the first failures expose.
+[2026-05-12T23:00:42.951Z] Running command: /bin/bash -lc 'rg -n "suffix_only_conversation|conversation_id|committed_messages|Conversatio...
+[2026-05-12T23:00:42.971Z] Command completed: /bin/bash -lc 'rg -n "suffix_only_conversation|conversation_id|committed_messages|Conversatio... (exit 0)
+[2026-05-12T23:00:43.113Z] Running command: /bin/bash -lc 'python -m py_compile src/nemotron_voice/services/nvidia/nemotron_omni.py src/n...
+[2026-05-12T23:00:43.113Z] Command failed: /bin/bash -lc 'python -m py_compile src/nemotron_voice/services/nvidia/nemotron_omni.py src/n... (exit 127)
+[2026-05-12T23:00:46.873Z] Assistant message captured: The workspace doesn’t have a plain `python` binary, so I’m switching to `python3` for a quick...
+
+[2026-05-12T23:00:46.873Z] Assistant message
+The workspace doesn’t have a plain `python` binary, so I’m switching to `python3` for a quick syntax check before running the project’s `uv` test command.
+[2026-05-12T23:00:48.871Z] Running command: /bin/bash -lc 'python3 -m py_compile src/nemotron_voice/services/nvidia/nemotron_omni.py src/...
+[2026-05-12T23:00:48.872Z] Command completed: /bin/bash -lc 'python3 -m py_compile src/nemotron_voice/services/nvidia/nemotron_omni.py src/... (exit 0)
+[2026-05-12T23:00:52.603Z] Assistant message captured: I’m at the verification loop now. First pass is the two targeted test files exactly as reques...
+
+[2026-05-12T23:00:52.603Z] Assistant message
+I’m at the verification loop now. First pass is the two targeted test files exactly as requested; then I’ll fix whatever breaks and finish with the import smoke check.
+[2026-05-12T23:00:54.870Z] Running command: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T23:00:57.092Z] Command failed: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 1)
+[2026-05-12T23:01:05.406Z] Assistant message captured: One aligned case failed on `LLMContext.tool_choice` being read-only. I’m fixing that test to ...
+
+[2026-05-12T23:01:05.406Z] Assistant message
+One aligned case failed on `LLMContext.tool_choice` being read-only. I’m fixing that test to mutate the underlying context state in the way Pipecat actually stores it, then I’ll rerun the same targeted shard.
+[2026-05-12T23:01:05.445Z] Running command: /bin/bash -lc 'rg -n "class LLMContext|def tool_choice|_tool_choice|tool_choice" pipecat-core...
+[2026-05-12T23:01:05.466Z] Command completed: /bin/bash -lc 'rg -n "class LLMContext|def tool_choice|_tool_choice|tool_choice" pipecat-core... (exit 0)
+[2026-05-12T23:01:05.613Z] Running command: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/processors/aggregators/llm_conte...
+[2026-05-12T23:01:05.613Z] Command completed: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/processors/aggregators/llm_conte... (exit 0)
+[2026-05-12T23:01:09.945Z] Running command: /bin/bash -lc 'rg -n "def tools|set_tools" pipecat-core-code/src/pipecat/processors/aggregato...
+[2026-05-12T23:01:09.946Z] Command completed: /bin/bash -lc 'rg -n "def tools|set_tools" pipecat-core-code/src/pipecat/processors/aggregato... (exit 0)
+[2026-05-12T23:01:15.557Z] Applying 1 file change(s).
+[2026-05-12T23:01:15.574Z] File changes completed.
+[2026-05-12T23:01:19.554Z] Assistant message captured: I’m also making the cache helper file explicit about its role now: helper coverage only, with...
+
+[2026-05-12T23:01:19.554Z] Assistant message
+I’m also making the cache helper file explicit about its role now: helper coverage only, with integration behavior owned by the aligned suite. I’ll add a small default-strip check there since step 5 flipped that default.
+[2026-05-12T23:01:23.272Z] Applying 1 file change(s).
+[2026-05-12T23:01:23.273Z] File changes completed.
+[2026-05-12T23:01:29.923Z] Running command: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T23:01:31.842Z] Command completed: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-12T23:01:40.965Z] Assistant message captured: The targeted test shard is green. I’m doing the requested import smoke check next and then I’...
+
+[2026-05-12T23:01:40.965Z] Assistant message
+The targeted test shard is green. I’m doing the requested import smoke check next and then I’ll summarize the implementation details around rotation, rebase, and success-only promotion.
+[2026-05-12T23:01:43.158Z] Running command: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-12T23:01:44.024Z] Command completed: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-12T23:01:50.369Z] Running command: /bin/bash -lc 'git diff --stat -- src/nemotron_voice/services/nvidia/nemotron_omni.py src/nem...
+[2026-05-12T23:01:50.386Z] Command completed: /bin/bash -lc 'git diff --stat -- src/nemotron_voice/services/nvidia/nemotron_omni.py src/nem... (exit 0)
+[2026-05-12T23:02:26.980Z] Assistant message captured: 1. Work performed Modified [nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemot...
+
+[2026-05-12T23:02:26.980Z] Assistant message
+1. Work performed
+
+Modified [nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py), [bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bot.py), [test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py), and [test_nemotron_omni_conversation_cache.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_conversation_cache.py).
+
+In the service I reintroduced `conversation_id`, `self._conversation_cache_committed`, `committed_messages`, and `self._committed_cache_shape_fingerprint`; rebuilt `_build_payload()` as a client-authoritative projection over the normalized shared-context transcript; added rotation on committed-prefix rewrites and cache-shape changes; reinstated `ConversationCacheMissError` plus 409 detection and a one-shot same-`conversation_id` full-history rebase retry; and flipped historical-audio stripping default to on. Promotion of `committed_messages` now happens only after a successful request returns to `_process_context()`, never from generated assistant output.
+
+In the bot I restored the cache env wiring: `NEMOTRON_OMNI_ENABLE_CONVERSATION_CACHE` controls whether a `conversation_id` is passed, and `NEMOTRON_OMNI_CONVERSATION_ID` overrides the generated `pipecat-...` id.
+
+2. Current project status
+
+The requested verification passed:
+
+- `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr --group vllm-test python -m pytest -q tests/test_nemotron_omni_aligned.py tests/test_nemotron_omni_conversation_cache.py`
+  Result: `54 passed`
+- `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr python -c "import nemotron_voice.bot; import nemotron_voice.services.nvidia.nemotron_omni; print('imports-ok')"`
+  Result: `imports-ok`
+
+`tests/test_nemotron_omni_aligned.py` now includes the step-5 client-authoritative cases from the plan: cached assistant+user suffixes, tool-followup assistant+tool suffixes, interrupted sync-tool `[user]` suffix reuse, cache-miss rebase, non-append rewrite rotation, tool/tool_choice rotation, chat-template/extra rotation, cancel/fail no-advance behavior, and golden payload cases. `tests/test_nemotron_omni_conversation_cache.py` remains helper coverage and now explicitly checks the default historical-audio stripping behavior.
+
+3. Blockers, concerns, deviations
+
+No blockers.
+
+The cache-miss retry lives in `_run_completion_payload()`. `_stream_completion_pass()` raises `ConversationCacheMissError` on a 409 miss, `_run_completion_payload()` catches it once, rebuilds the payload with the full audio-stripped history, keeps the same `conversation_id`, drops `conversation_require_cache`, and retries.
+
+Non-append rewrite vs cache miss are separated at different layers. `_build_payload()` compares `current_full` against `committed_messages` plus `cache_shape_fingerprint`; prefix rewrite or fingerprint change rotates to a new `conversation_id` before sending. Cache miss is only a server-side attach failure after a suffix request was otherwise valid, and it rebases on the same `conversation_id`.
+
+`committed_messages` promotion is success-only: `_process_context()` updates it only if `_run_completion_payload()` returns a completed result. Cancelled or failed requests return no promotable result, so the mirror state does not advance.
+
+`cache_shape_fingerprint` change detection is done in `_build_payload()` by comparing `snapshot.cache_shape_fingerprint` with `self._committed_cache_shape_fingerprint`; on mismatch, the service rotates `conversation_id`, clears `committed_messages`, clears `_conversation_cache_committed`, clears `_committed_cache_shape_fingerprint`, and clears the per-turn duplicate-tool map.
+
+4. Suggested next step
+
+Implement step 6 in `vllm-v0.20.0/` so the server matches this client-authoritative wire protocol, then run the end-to-end regression harness that step 5 intentionally skipped.
+[2026-05-12T23:02:27.015Z] Turn completed.
+
+[2026-05-12T23:02:27.056Z] Final output
+1. Work performed
+
+Modified [nemotron_omni.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/services/nvidia/nemotron_omni.py), [bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bot.py), [test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py), and [test_nemotron_omni_conversation_cache.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_conversation_cache.py).
+
+In the service I reintroduced `conversation_id`, `self._conversation_cache_committed`, `committed_messages`, and `self._committed_cache_shape_fingerprint`; rebuilt `_build_payload()` as a client-authoritative projection over the normalized shared-context transcript; added rotation on committed-prefix rewrites and cache-shape changes; reinstated `ConversationCacheMissError` plus 409 detection and a one-shot same-`conversation_id` full-history rebase retry; and flipped historical-audio stripping default to on. Promotion of `committed_messages` now happens only after a successful request returns to `_process_context()`, never from generated assistant output.
+
+In the bot I restored the cache env wiring: `NEMOTRON_OMNI_ENABLE_CONVERSATION_CACHE` controls whether a `conversation_id` is passed, and `NEMOTRON_OMNI_CONVERSATION_ID` overrides the generated `pipecat-...` id.
+
+2. Current project status
+
+The requested verification passed:
+
+- `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr --group vllm-test python -m pytest -q tests/test_nemotron_omni_aligned.py tests/test_nemotron_omni_conversation_cache.py`
+  Result: `54 passed`
+- `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr python -c "import nemotron_voice.bot; import nemotron_voice.services.nvidia.nemotron_omni; print('imports-ok')"`
+  Result: `imports-ok`
+
+`tests/test_nemotron_omni_aligned.py` now includes the step-5 client-authoritative cases from the plan: cached assistant+user suffixes, tool-followup assistant+tool suffixes, interrupted sync-tool `[user]` suffix reuse, cache-miss rebase, non-append rewrite rotation, tool/tool_choice rotation, chat-template/extra rotation, cancel/fail no-advance behavior, and golden payload cases. `tests/test_nemotron_omni_conversation_cache.py` remains helper coverage and now explicitly checks the default historical-audio stripping behavior.
+
+3. Blockers, concerns, deviations
+
+No blockers.
+
+The cache-miss retry lives in `_run_completion_payload()`. `_stream_completion_pass()` raises `ConversationCacheMissError` on a 409 miss, `_run_completion_payload()` catches it once, rebuilds the payload with the full audio-stripped history, keeps the same `conversation_id`, drops `conversation_require_cache`, and retries.
+
+Non-append rewrite vs cache miss are separated at different layers. `_build_payload()` compares `current_full` against `committed_messages` plus `cache_shape_fingerprint`; prefix rewrite or fingerprint change rotates to a new `conversation_id` before sending. Cache miss is only a server-side attach failure after a suffix request was otherwise valid, and it rebases on the same `conversation_id`.
+
+`committed_messages` promotion is success-only: `_process_context()` updates it only if `_run_completion_payload()` returns a completed result. Cancelled or failed requests return no promotable result, so the mirror state does not advance.
+
+`cache_shape_fingerprint` change detection is done in `_build_payload()` by comparing `snapshot.cache_shape_fingerprint` with `self._committed_cache_shape_fingerprint`; on mismatch, the service rotates `conversation_id`, clears `committed_messages`, clears `_conversation_cache_committed`, clears `_committed_cache_shape_fingerprint`, and clears the per-turn duplicate-tool map.
+
+4. Suggested next step
+
+Implement step 6 in `vllm-v0.20.0/` so the server matches this client-authoritative wire protocol, then run the end-to-end regression harness that step 5 intentionally skipped.
