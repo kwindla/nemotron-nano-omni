@@ -1,0 +1,165 @@
+[2026-05-13T00:06:47.173Z] Starting Codex Task.
+[2026-05-13T00:06:49.565Z] Starting Codex task thread.
+[2026-05-13T00:06:50.098Z] Thread ready (019e1ea8-59c9-7543-a3d7-24288194406f).
+[2026-05-13T00:06:50.124Z] Turn started (019e1ea8-5a05-7710-8b9a-e65f374024dc).
+[2026-05-13T00:07:04.648Z] Assistant message captured: Reading the step-7 plan text and the current collector/tests first, then I’ll rework the coll...
+
+[2026-05-13T00:07:04.648Z] Assistant message
+Reading the step-7 plan text and the current collector/tests first, then I’ll rework the collector state machine in `bot.py`, add targeted alignment tests, and run the requested verification loop.
+[2026-05-13T00:07:04.690Z] Running command: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-13T00:07:04.709Z] Command completed: /bin/bash -lc "sed -n '1,260p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-13T00:07:04.741Z] Running command: /bin/bash -lc "rg -n \"class UserAudioContextCollector|InterruptedToolPassSignal|UserAudioCon...
+[2026-05-13T00:07:04.759Z] Command completed: /bin/bash -lc "rg -n \"class UserAudioContextCollector|InterruptedToolPassSignal|UserAudioCon... (exit 0)
+[2026-05-13T00:07:04.760Z] Running command: /bin/bash -lc "sed -n '1,260p' src/nemotron_voice/bot.py"
+[2026-05-13T00:07:04.778Z] Command completed: /bin/bash -lc "sed -n '1,260p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-13T00:07:04.778Z] Running command: /bin/bash -lc "sed -n '1,320p' tests/test_nemotron_omni_aligned.py"
+[2026-05-13T00:07:04.794Z] Command completed: /bin/bash -lc "sed -n '1,320p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-13T00:07:16.611Z] Assistant message captured: I’ve got the current collector shape and the plan skeleton. Next I’m pulling the exact step-7...
+
+[2026-05-13T00:07:16.611Z] Assistant message
+I’ve got the current collector shape and the plan skeleton. Next I’m pulling the exact step-7 wording plus the collector implementation and nearby test helpers so the refactor matches the committed steps precisely.
+[2026-05-13T00:07:16.651Z] Running command: /bin/bash -lc "rg -n \"\\*\\*7\\.|\\*\\*4\\.|UserAudioContextCollector|run_bot|audio_collecto...
+[2026-05-13T00:07:16.651Z] Command completed: /bin/bash -lc "rg -n \"\\*\\*7\\.|\\*\\*4\\.|UserAudioContextCollector|run_bot|audio_collecto... (exit 0)
+[2026-05-13T00:07:16.702Z] Running command: /bin/bash -lc "sed -n '320,430p' src/nemotron_voice/bot.py"
+[2026-05-13T00:07:16.717Z] Running command: /bin/bash -lc "sed -n '450,530p' src/nemotron_voice/bot.py"
+[2026-05-13T00:07:16.717Z] Command completed: /bin/bash -lc "sed -n '320,430p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-13T00:07:16.717Z] Command completed: /bin/bash -lc "sed -n '450,530p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-13T00:07:16.736Z] Running command: /bin/bash -lc "sed -n '1560,1705p' tests/test_nemotron_omni_aligned.py"
+[2026-05-13T00:07:16.754Z] Command completed: /bin/bash -lc "sed -n '1560,1705p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-13T00:07:16.754Z] Running command: /bin/bash -lc "sed -n '1980,2035p' tests/test_nemotron_omni_aligned.py"
+[2026-05-13T00:07:16.754Z] Command completed: /bin/bash -lc "sed -n '1980,2035p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-13T00:07:16.754Z] Running command: /bin/bash -lc "sed -n '2550,2825p' tests/test_nemotron_omni_aligned.py"
+[2026-05-13T00:07:16.754Z] Command completed: /bin/bash -lc "sed -n '2550,2825p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-13T00:07:19.726Z] Running command: /bin/bash -lc "sed -n '275,324p' proj-2026-05-11-2008/PLAN.md"
+[2026-05-13T00:07:19.743Z] Command completed: /bin/bash -lc "sed -n '275,324p' proj-2026-05-11-2008/PLAN.md" (exit 0)
+[2026-05-13T00:07:28.840Z] Assistant message captured: I’ve got the exact step-7 contract now. I’m reading the frame/message APIs and the existing a...
+
+[2026-05-13T00:07:28.840Z] Assistant message
+I’ve got the exact step-7 contract now. I’m reading the frame/message APIs and the existing audio-collector tests next so the new state machine and assertions line up with how `LLMContext` actually stores audio turns.
+[2026-05-13T00:07:28.877Z] Running command: /bin/bash -lc "sed -n '930,1075p' pipecat-core-code/src/pipecat/frames/frames.py"
+[2026-05-13T00:07:28.877Z] Command completed: /bin/bash -lc "sed -n '930,1075p' pipecat-core-code/src/pipecat/frames/frames.py" (exit 0)
+[2026-05-13T00:07:28.896Z] Running command: /bin/bash -lc "rg -n \"add_audio_frames_message|audio_frames_message|get_messages\\(\\).*audi...
+[2026-05-13T00:07:28.915Z] Command completed: /bin/bash -lc "rg -n \"add_audio_frames_message|audio_frames_message|get_messages\\(\\).*audi... (exit 0)
+[2026-05-13T00:07:28.915Z] Running command: /bin/bash -lc "sed -n '320,520p' tests/test_nemotron_omni_aligned.py"
+[2026-05-13T00:07:28.915Z] Command completed: /bin/bash -lc "sed -n '320,520p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-13T00:07:28.921Z] Running command: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/processors/aggregators/llm_conte...
+[2026-05-13T00:07:28.937Z] Command completed: /bin/bash -lc "sed -n '1,260p' pipecat-core-code/src/pipecat/processors/aggregators/llm_conte... (exit 0)
+[2026-05-13T00:07:32.493Z] Running command: /bin/bash -lc "sed -n '420,485p' pipecat-core-code/src/pipecat/processors/aggregators/llm_con...
+[2026-05-13T00:07:32.493Z] Command completed: /bin/bash -lc "sed -n '420,485p' pipecat-core-code/src/pipecat/processors/aggregators/llm_con... (exit 0)
+[2026-05-13T00:07:35.761Z] Running command: /bin/bash -lc 'rg -n "class InputAudioRawFrame|class AudioRawFrame|num_frames:|num_channels:"...
+[2026-05-13T00:07:35.761Z] Command completed: /bin/bash -lc 'rg -n "class InputAudioRawFrame|class AudioRawFrame|num_frames:|num_channels:"... (exit 0)
+[2026-05-13T00:07:38.835Z] Running command: /bin/bash -lc "sed -n '140,190p' pipecat-core-code/src/pipecat/frames/frames.py && sed -n '12...
+[2026-05-13T00:07:38.835Z] Command completed: /bin/bash -lc "sed -n '140,190p' pipecat-core-code/src/pipecat/frames/frames.py && sed -n '12... (exit 0)
+[2026-05-13T00:07:42.005Z] Running command: /bin/bash -lc "rg -n \"async def push_context_frame|push_context_frame\\(\" pipecat-core-code...
+[2026-05-13T00:07:42.005Z] Command completed: /bin/bash -lc "rg -n \"async def push_context_frame|push_context_frame\\(\" pipecat-core-code... (exit 0)
+[2026-05-13T00:07:45.192Z] Running command: /bin/bash -lc "sed -n '430,455p' pipecat-core-code/src/pipecat/processors/aggregators/llm_res...
+[2026-05-13T00:07:45.192Z] Command completed: /bin/bash -lc "sed -n '430,455p' pipecat-core-code/src/pipecat/processors/aggregators/llm_res... (exit 0)
+[2026-05-13T00:07:50.251Z] Running command: /bin/bash -lc 'rg -n "audio_collector|AudioOnlyLLMUserAggregator|UserAudioContextCollector|ad...
+[2026-05-13T00:07:50.267Z] Command completed: /bin/bash -lc 'rg -n "audio_collector|AudioOnlyLLMUserAggregator|UserAudioContextCollector|ad... (exit 0)
+[2026-05-13T00:07:53.094Z] Running command: /bin/bash -lc "sed -n '3000,3145p' tests/test_nemotron_omni_aligned.py"
+[2026-05-13T00:07:53.095Z] Command completed: /bin/bash -lc "sed -n '3000,3145p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-13T00:07:57.258Z] Running command: /bin/bash -lc "sed -n '260,400p' src/nemotron_voice/bot.py"
+[2026-05-13T00:07:57.277Z] Command completed: /bin/bash -lc "sed -n '260,400p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-13T00:09:29.216Z] Assistant message captured: Plan: 1. Rework `UserAudioContextCollector` into explicit lookback / active-capture / commit-...
+
+[2026-05-13T00:09:29.216Z] Assistant message
+Plan:
+1. Rework `UserAudioContextCollector` into explicit lookback / active-capture / commit-boundary state, add the interrupted-tool-pass signal read-and-clear, and wire the shared signal through `run_bot`.
+2. Add a small audio-test harness in `tests/test_nemotron_omni_aligned.py` that drives synthetic `InputAudioRawFrame` / VAD frames and inspects the real `LLMContext` audio messages.
+3. Run the requested aligned/cache test subset plus the import smoke check, then fix anything the refactor breaks.
+[2026-05-13T00:10:16.006Z] Assistant message captured: I’ve got the state-machine shape pinned down. I’m editing `bot.py` now to swap out the frame-...
+
+[2026-05-13T00:10:16.006Z] Assistant message
+I’ve got the state-machine shape pinned down. I’m editing `bot.py` now to swap out the frame-count approximation for a duration-tracked lookback buffer, preserve one active Smart-Turn capture across interim VAD pauses, and consume the interruption marker on commit.
+[2026-05-13T00:10:51.065Z] Running command: /bin/bash -lc "sed -n '308,388p' src/nemotron_voice/bot.py"
+[2026-05-13T00:10:51.065Z] Command completed: /bin/bash -lc "sed -n '308,388p' src/nemotron_voice/bot.py" (exit 0)
+[2026-05-13T00:10:54.157Z] Applying 1 file change(s).
+[2026-05-13T00:10:54.174Z] File changes completed.
+[2026-05-13T00:11:24.070Z] Applying 1 file change(s).
+[2026-05-13T00:11:24.070Z] File changes completed.
+[2026-05-13T00:11:30.984Z] Applying 1 file change(s).
+[2026-05-13T00:11:30.986Z] File changes completed.
+[2026-05-13T00:11:37.904Z] Assistant message captured: The collector rewrite is in place. I’m moving to the test file now: adding a tiny synthetic-a...
+
+[2026-05-13T00:11:37.904Z] Assistant message
+The collector rewrite is in place. I’m moving to the test file now: adding a tiny synthetic-audio harness, then the six step-7 cases against the real `LLMContext` audio messages before I run the targeted suite.
+[2026-05-13T00:11:37.940Z] Running command: /bin/bash -lc "sed -n '1,90p' tests/test_nemotron_omni_aligned.py"
+[2026-05-13T00:11:37.959Z] Command completed: /bin/bash -lc "sed -n '1,90p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-13T00:11:37.975Z] Running command: /bin/bash -lc "sed -n '160,220p' tests/test_nemotron_omni_aligned.py"
+[2026-05-13T00:11:37.975Z] Command completed: /bin/bash -lc "sed -n '160,220p' tests/test_nemotron_omni_aligned.py" (exit 0)
+[2026-05-13T00:12:26.277Z] Applying 1 file change(s).
+[2026-05-13T00:12:26.294Z] File changes completed.
+[2026-05-13T00:12:33.959Z] Applying 1 file change(s).
+[2026-05-13T00:12:33.960Z] File changes completed.
+[2026-05-13T00:12:52.061Z] Applying 1 file change(s).
+[2026-05-13T00:12:52.062Z] File changes completed.
+[2026-05-13T00:13:38.566Z] Applying 1 file change(s).
+[2026-05-13T00:13:38.567Z] File changes completed.
+[2026-05-13T00:13:46.788Z] Assistant message captured: The new tests are in. I’m doing a focused pass on the audio-collector cases first so I can ti...
+
+[2026-05-13T00:13:46.788Z] Assistant message
+The new tests are in. I’m doing a focused pass on the audio-collector cases first so I can tighten the state machine quickly before running the full aligned/cache verification command.
+[2026-05-13T00:13:48.868Z] Running command: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-13T00:13:51.302Z] Command completed: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-13T00:13:59.323Z] Assistant message captured: The focused collector cases passed. I’m running the full requested verification loop now: the...
+
+[2026-05-13T00:13:59.323Z] Assistant message
+The focused collector cases passed. I’m running the full requested verification loop now: the aligned/cache pytest subset and the `nemotron_voice.bot` smoke import in parallel.
+[2026-05-13T00:13:59.494Z] Running command: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-13T00:13:59.513Z] Running command: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-13T00:14:00.452Z] Command completed: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-13T00:14:36.828Z] Command completed: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-13T00:14:50.895Z] Assistant message captured: The requested verification passed cleanly. I’m doing a quick diff read now to capture the exa...
+
+[2026-05-13T00:14:50.895Z] Assistant message
+The requested verification passed cleanly. I’m doing a quick diff read now to capture the exact change points and line references for the close-out.
+[2026-05-13T00:14:50.949Z] Running command: /bin/bash -lc 'git diff -- src/nemotron_voice/bot.py tests/test_nemotron_omni_aligned.py'
+[2026-05-13T00:14:50.950Z] Command completed: /bin/bash -lc 'git diff -- src/nemotron_voice/bot.py tests/test_nemotron_omni_aligned.py' (exit 0)
+[2026-05-13T00:14:50.977Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '310,420p'"
+[2026-05-13T00:14:50.996Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '310,420p'" (exit 0)
+[2026-05-13T00:14:50.996Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '505,540p'"
+[2026-05-13T00:14:50.996Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '505,540p'" (exit 0)
+[2026-05-13T00:14:51.018Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '170,260p'"
+[2026-05-13T00:14:51.038Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '170,260p'" (exit 0)
+[2026-05-13T00:14:51.038Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '430,530p'"
+[2026-05-13T00:14:51.038Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '430,530p'" (exit 0)
+[2026-05-13T00:14:51.041Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '3190,3445p'"
+[2026-05-13T00:14:51.042Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '3190,3445p'" (exit 0)
+[2026-05-13T00:14:54.777Z] Running command: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '3445,3495p'"
+[2026-05-13T00:14:54.777Z] Command completed: /bin/bash -lc "nl -ba tests/test_nemotron_omni_aligned.py | sed -n '3445,3495p'" (exit 0)
+[2026-05-13T00:15:01.390Z] Assistant message captured: I’m cleaning one small test-file detail before closing: the step-7 cases pass, but there are ...
+
+[2026-05-13T00:15:01.390Z] Assistant message
+I’m cleaning one small test-file detail before closing: the step-7 cases pass, but there are two frame imports in the test module that never got used.
+[2026-05-13T00:15:03.240Z] Applying 1 file change(s).
+[2026-05-13T00:15:03.258Z] File changes completed.
+[2026-05-13T00:15:10.944Z] Assistant message captured: The cleanup was test-only, but I’m rerunning the full verification command so the final state...
+
+[2026-05-13T00:15:10.944Z] Assistant message
+The cleanup was test-only, but I’m rerunning the full verification command so the final state reflects the exact checked-in edits.
+[2026-05-13T00:15:11.109Z] Running command: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-13T00:15:11.141Z] Running command: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --...
+[2026-05-13T00:15:12.045Z] Command completed: /bin/bash -lc "PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-13T00:15:48.797Z] Command completed: /bin/bash -lc 'PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --... (exit 0)
+[2026-05-13T00:15:57.411Z] Running command: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '565,602p'"
+[2026-05-13T00:15:57.429Z] Command completed: /bin/bash -lc "nl -ba src/nemotron_voice/bot.py | sed -n '565,602p'" (exit 0)
+[2026-05-13T00:16:27.031Z] Assistant message captured: 1. In [src/nemotron_voice/bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bo...
+
+[2026-05-13T00:16:27.031Z] Assistant message
+1. In [src/nemotron_voice/bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bot.py:313), `UserAudioContextCollector` now uses a duration-tracked rolling lookback deque instead of frame-count trimming, keeps one active capture alive across interim VAD pauses, and records the latest `VADUserStoppedSpeakingFrame` boundary separately from final turn commit. On `UserStoppedSpeakingFrame` and `EndFrame`/`CancelFrame`, it commits `active_capture[:last_vad_stop]` when that boundary exists, otherwise falls back to the current active capture for the watchdog-timeout path; any post-final-VAD audio is carried into the next lookback buffer. The collector also now read-clears `InterruptedToolPassSignal` by prepending `<user_interruption></user_interruption> ` to the committed audio message text when flagged. In `run_bot`, the same shared signal is passed into the collector and the pipeline comment now documents why the collector must stay ahead of the LLM in that branch [bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bot.py:572).
+
+2. In [tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py:475), I added a synthetic-audio harness plus these step-7 tests: `test_audio_collector_preserves_full_lookback_with_variable_frame_sizes`, `test_audio_collector_resumes_same_turn_after_mid_pause`, `test_audio_collector_tracks_latest_vad_stop_and_commits_on_user_stopped`, `test_audio_collector_excludes_post_final_vad_stop_audio_from_committed_turn_and_carries_it_forward`, `test_audio_collector_timeout_without_fresh_vad_stop_commits_current_active_capture`, and `test_audio_collector_prepends_user_interruption_marker_when_flagged` [tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py:3241). Verification passed: `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr --group vllm-test python -m pytest -q tests/test_nemotron_omni_aligned.py tests/test_nemotron_omni_conversation_cache.py` -> `64 passed`; smoke import -> `imports-ok`.
+
+3. No blockers or scope deviations. The only remaining signal from verification is the pre-existing `audioop` deprecation warning coming from Pipecat’s audio utilities.
+
+4. Suggested next step: mark step 7 complete in `proj-2026-05-11-2008/PLAN.md` and move to step 8 test-suite consolidation, or commit this as the step-7 change if you want the plan update handled separately.
+[2026-05-13T00:16:27.098Z] Turn completed.
+
+[2026-05-13T00:16:27.140Z] Final output
+1. In [src/nemotron_voice/bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bot.py:313), `UserAudioContextCollector` now uses a duration-tracked rolling lookback deque instead of frame-count trimming, keeps one active capture alive across interim VAD pauses, and records the latest `VADUserStoppedSpeakingFrame` boundary separately from final turn commit. On `UserStoppedSpeakingFrame` and `EndFrame`/`CancelFrame`, it commits `active_capture[:last_vad_stop]` when that boundary exists, otherwise falls back to the current active capture for the watchdog-timeout path; any post-final-VAD audio is carried into the next lookback buffer. The collector also now read-clears `InterruptedToolPassSignal` by prepending `<user_interruption></user_interruption> ` to the committed audio message text when flagged. In `run_bot`, the same shared signal is passed into the collector and the pipeline comment now documents why the collector must stay ahead of the LLM in that branch [bot.py](/home/khkramer/src/nemotron-nano-omni/src/nemotron_voice/bot.py:572).
+
+2. In [tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py:475), I added a synthetic-audio harness plus these step-7 tests: `test_audio_collector_preserves_full_lookback_with_variable_frame_sizes`, `test_audio_collector_resumes_same_turn_after_mid_pause`, `test_audio_collector_tracks_latest_vad_stop_and_commits_on_user_stopped`, `test_audio_collector_excludes_post_final_vad_stop_audio_from_committed_turn_and_carries_it_forward`, `test_audio_collector_timeout_without_fresh_vad_stop_commits_current_active_capture`, and `test_audio_collector_prepends_user_interruption_marker_when_flagged` [tests/test_nemotron_omni_aligned.py](/home/khkramer/src/nemotron-nano-omni/tests/test_nemotron_omni_aligned.py:3241). Verification passed: `PYTHONPATH=src uv run --with-editable ./pipecat-core-code --with websockets --with python-dotenv --group asr --group vllm-test python -m pytest -q tests/test_nemotron_omni_aligned.py tests/test_nemotron_omni_conversation_cache.py` -> `64 passed`; smoke import -> `imports-ok`.
+
+3. No blockers or scope deviations. The only remaining signal from verification is the pre-existing `audioop` deprecation warning coming from Pipecat’s audio utilities.
+
+4. Suggested next step: mark step 7 complete in `proj-2026-05-11-2008/PLAN.md` and move to step 8 test-suite consolidation, or commit this as the step-7 change if you want the plan update handled separately.

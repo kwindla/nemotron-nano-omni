@@ -1,11 +1,15 @@
 import asyncio
+import base64
 import contextlib
 import copy
 import functools
+import io
 import json
+import struct
 import subprocess
 import sys
 import unittest
+import wave
 from unittest import mock
 from pathlib import Path
 from typing import Any, Callable
@@ -19,12 +23,16 @@ from pipecat.frames.frames import (
     FunctionCallInProgressFrame,
     FunctionCallResultFrame,
     FunctionCallsStartedFrame,
+    InputAudioRawFrame,
     InterruptionFrame,
     LLMContextAssistantTimestampFrame,
     LLMContextFrame,
     LLMFullResponseEndFrame,
     LLMFullResponseStartFrame,
     LLMTextFrame,
+    UserStoppedSpeakingFrame,
+    VADUserStartedSpeakingFrame,
+    VADUserStoppedSpeakingFrame,
 )
 from pipecat.pipeline.parallel_pipeline import ParallelPipeline
 from pipecat.pipeline.pipeline import Pipeline
@@ -177,12 +185,23 @@ class _RecordingUserAggregator(AudioOnlyLLMUserAggregator):
 
 
 class _RecordingAudioCollector(UserAudioContextCollector):
-    def __init__(self, *, context: LLMContext, user_aggregator: AudioOnlyLLMUserAggregator):
+    def __init__(
+        self,
+        *,
+        context: LLMContext,
+        user_aggregator: AudioOnlyLLMUserAggregator,
+        audio_context_text: str = "User audio follows.",
+        push_context_on_finish: bool = False,
+        pre_speech_buffer_secs: float = 0.5,
+        interrupted_tool_pass_signal: InterruptedToolPassSignal | None = None,
+    ):
         super().__init__(
             context=context,
             user_aggregator=user_aggregator,
-            audio_context_text="User audio follows.",
-            push_context_on_finish=False,
+            audio_context_text=audio_context_text,
+            push_context_on_finish=push_context_on_finish,
+            pre_speech_buffer_secs=pre_speech_buffer_secs,
+            interrupted_tool_pass_signal=interrupted_tool_pass_signal,
         )
         self.seen_frames: list[tuple[Any, FrameDirection]] = []
 
@@ -450,6 +469,83 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
             tools=template.tools,
             tool_choice=template.tool_choice,
         )
+
+    def _make_input_audio_frame(
+        self,
+        *,
+        sample: int,
+        num_frames: int,
+        sample_rate: int = 100,
+    ) -> InputAudioRawFrame:
+        audio = struct.pack(f"<{num_frames}h", *([sample] * num_frames))
+        return InputAudioRawFrame(audio=audio, sample_rate=sample_rate, num_channels=1)
+
+    async def _make_audio_collector_harness(
+        self,
+        *,
+        pre_speech_buffer_secs: float = 0.5,
+        push_context_on_finish: bool = False,
+        interrupted_tool_pass_signal: InterruptedToolPassSignal | None = None,
+        audio_context_text: str = "User audio follows.",
+    ) -> tuple[
+        LLMContext,
+        _RecordingUserAggregator,
+        _RecordingAudioCollector,
+        list[tuple[Any, FrameDirection]],
+        list[tuple[Any, FrameDirection]],
+    ]:
+        context = self._context_with_messages([])
+        user_aggregator = _RecordingUserAggregator(context)
+        pushed_context_frames: list[tuple[Any, FrameDirection]] = []
+        forwarded_frames: list[tuple[Any, FrameDirection]] = []
+
+        async def user_push(frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
+            pushed_context_frames.append((frame, direction))
+
+        async def collector_push(frame, direction: FrameDirection = FrameDirection.DOWNSTREAM):
+            forwarded_frames.append((frame, direction))
+
+        user_aggregator.push_frame = user_push  # type: ignore[method-assign]
+        collector = _RecordingAudioCollector(
+            context=context,
+            user_aggregator=user_aggregator,
+            audio_context_text=audio_context_text,
+            push_context_on_finish=push_context_on_finish,
+            pre_speech_buffer_secs=pre_speech_buffer_secs,
+            interrupted_tool_pass_signal=interrupted_tool_pass_signal,
+        )
+        collector.push_frame = collector_push  # type: ignore[method-assign]
+        return context, user_aggregator, collector, pushed_context_frames, forwarded_frames
+
+    async def _drive_audio_collector(
+        self,
+        collector: UserAudioContextCollector,
+        frames: list[Any],
+        *,
+        direction: FrameDirection = FrameDirection.DOWNSTREAM,
+    ) -> None:
+        for frame in frames:
+            await collector.process_frame(frame, direction)
+
+    def _audio_message_text_and_pcm(
+        self,
+        context: LLMContext,
+        *,
+        index: int = -1,
+    ) -> tuple[str, bytes]:
+        message = context.get_messages()[index]
+        self.assertIsInstance(message, dict)
+        content = message["content"]
+        self.assertIsInstance(content, list)
+        text = next(item["text"] for item in content if item["type"] == "text")
+        encoded_audio = next(
+            item["input_audio"]["data"] for item in content if item["type"] == "input_audio"
+        )
+
+        with wave.open(io.BytesIO(base64.b64decode(encoded_audio)), "rb") as wav_reader:
+            pcm = wav_reader.readframes(wav_reader.getnframes())
+
+        return text, pcm
 
     async def _prime_service_for_tools(self, service: NemotronOmniAudioLLMService) -> None:
         await service._create_sequential_runner_task()
@@ -3139,6 +3235,245 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 for frame, direction in recorded_output_frames
             )
         )
+
+    async def test_audio_collector_preserves_full_lookback_with_variable_frame_sizes(
+        self,
+    ) -> None:
+        context, _, collector, _, _ = await self._make_audio_collector_harness(
+            pre_speech_buffer_secs=0.10
+        )
+        lookback_frames = [
+            self._make_input_audio_frame(sample=11, num_frames=1),
+            self._make_input_audio_frame(sample=12, num_frames=1),
+            self._make_input_audio_frame(sample=13, num_frames=4),
+            self._make_input_audio_frame(sample=14, num_frames=4),
+        ]
+        speech_frame = self._make_input_audio_frame(sample=21, num_frames=2)
+
+        await self._drive_audio_collector(
+            collector,
+            [
+                *lookback_frames,
+                VADUserStartedSpeakingFrame(),
+                speech_frame,
+                VADUserStoppedSpeakingFrame(),
+                UserStoppedSpeakingFrame(),
+            ],
+        )
+
+        self.assertEqual(len(context.get_messages()), 1)
+        text, pcm = self._audio_message_text_and_pcm(context)
+        self.assertEqual(text, "User audio follows.")
+        self.assertEqual(pcm, b"".join(frame.audio for frame in [*lookback_frames, speech_frame]))
+
+    async def test_audio_collector_resumes_same_turn_after_mid_pause(self) -> None:
+        context, _, collector, _, _ = await self._make_audio_collector_harness(
+            pre_speech_buffer_secs=0.10
+        )
+        lookback_frame = self._make_input_audio_frame(sample=31, num_frames=2)
+        first_speech = self._make_input_audio_frame(sample=41, num_frames=3)
+        pause_frame = self._make_input_audio_frame(sample=42, num_frames=2)
+        resumed_speech = self._make_input_audio_frame(sample=43, num_frames=3)
+
+        await self._drive_audio_collector(
+            collector,
+            [
+                lookback_frame,
+                VADUserStartedSpeakingFrame(),
+                first_speech,
+                VADUserStoppedSpeakingFrame(),
+                pause_frame,
+                VADUserStartedSpeakingFrame(),
+                resumed_speech,
+                VADUserStoppedSpeakingFrame(),
+                UserStoppedSpeakingFrame(),
+            ],
+        )
+
+        self.assertEqual(len(context.get_messages()), 1)
+        _, pcm = self._audio_message_text_and_pcm(context)
+        self.assertEqual(
+            pcm,
+            b"".join(
+                frame.audio
+                for frame in [lookback_frame, first_speech, pause_frame, resumed_speech]
+            ),
+        )
+
+    async def test_audio_collector_tracks_latest_vad_stop_and_commits_on_user_stopped(
+        self,
+    ) -> None:
+        context, _, collector, _, _ = await self._make_audio_collector_harness(
+            pre_speech_buffer_secs=0.10
+        )
+        lookback_frame = self._make_input_audio_frame(sample=51, num_frames=2)
+        first_speech = self._make_input_audio_frame(sample=61, num_frames=3)
+        between_segments = self._make_input_audio_frame(sample=62, num_frames=2)
+        resumed_speech = self._make_input_audio_frame(sample=63, num_frames=4)
+        post_final_vad = self._make_input_audio_frame(sample=64, num_frames=2)
+
+        await self._drive_audio_collector(
+            collector,
+            [
+                lookback_frame,
+                VADUserStartedSpeakingFrame(),
+                first_speech,
+                VADUserStoppedSpeakingFrame(),
+                between_segments,
+                VADUserStartedSpeakingFrame(),
+                resumed_speech,
+                VADUserStoppedSpeakingFrame(),
+                post_final_vad,
+                UserStoppedSpeakingFrame(),
+            ],
+        )
+
+        self.assertEqual(len(context.get_messages()), 1)
+        _, pcm = self._audio_message_text_and_pcm(context)
+        self.assertEqual(
+            pcm,
+            b"".join(
+                frame.audio
+                for frame in [lookback_frame, first_speech, between_segments, resumed_speech]
+            ),
+        )
+        self.assertNotEqual(
+            pcm,
+            b"".join(
+                frame.audio
+                for frame in [
+                    lookback_frame,
+                    first_speech,
+                    between_segments,
+                    resumed_speech,
+                    post_final_vad,
+                ]
+            ),
+        )
+
+    async def test_audio_collector_excludes_post_final_vad_stop_audio_from_committed_turn_and_carries_it_forward(
+        self,
+    ) -> None:
+        context, _, collector, _, _ = await self._make_audio_collector_harness(
+            pre_speech_buffer_secs=0.10
+        )
+        lookback_frame = self._make_input_audio_frame(sample=71, num_frames=2)
+        first_turn_speech = self._make_input_audio_frame(sample=81, num_frames=3)
+        carried_tail = self._make_input_audio_frame(sample=82, num_frames=2)
+        second_turn_speech = self._make_input_audio_frame(sample=83, num_frames=3)
+
+        await self._drive_audio_collector(
+            collector,
+            [
+                lookback_frame,
+                VADUserStartedSpeakingFrame(),
+                first_turn_speech,
+                VADUserStoppedSpeakingFrame(),
+                carried_tail,
+                UserStoppedSpeakingFrame(),
+                VADUserStartedSpeakingFrame(),
+                second_turn_speech,
+                VADUserStoppedSpeakingFrame(),
+                UserStoppedSpeakingFrame(),
+            ],
+        )
+
+        self.assertEqual(len(context.get_messages()), 2)
+        _, first_pcm = self._audio_message_text_and_pcm(context, index=0)
+        _, second_pcm = self._audio_message_text_and_pcm(context, index=1)
+        self.assertEqual(first_pcm, b"".join(frame.audio for frame in [lookback_frame, first_turn_speech]))
+        self.assertEqual(second_pcm, b"".join(frame.audio for frame in [carried_tail, second_turn_speech]))
+
+    async def test_audio_collector_timeout_without_fresh_vad_stop_commits_current_active_capture(
+        self,
+    ) -> None:
+        context, user_aggregator, collector, pushed_context_frames, _ = (
+            await self._make_audio_collector_harness(
+                pre_speech_buffer_secs=0.10,
+                push_context_on_finish=True,
+            )
+        )
+        lookback_frame = self._make_input_audio_frame(sample=91, num_frames=2)
+        first_speech = self._make_input_audio_frame(sample=92, num_frames=3)
+        second_speech = self._make_input_audio_frame(sample=93, num_frames=4)
+
+        await self._drive_audio_collector(
+            collector,
+            [
+                lookback_frame,
+                VADUserStartedSpeakingFrame(),
+                first_speech,
+                second_speech,
+                UserStoppedSpeakingFrame(),
+            ],
+        )
+
+        self.assertEqual(len(context.get_messages()), 1)
+        _, pcm = self._audio_message_text_and_pcm(context)
+        self.assertEqual(
+            pcm,
+            b"".join(frame.audio for frame in [lookback_frame, first_speech, second_speech]),
+        )
+        self.assertEqual(len(pushed_context_frames), 1)
+        pushed_frame, pushed_direction = pushed_context_frames[0]
+        self.assertIs(user_aggregator._context, context)
+        self.assertIsInstance(pushed_frame, LLMContextFrame)
+        self.assertIs(pushed_frame.context, context)
+        self.assertIs(pushed_direction, FrameDirection.DOWNSTREAM)
+
+    async def test_audio_collector_prepends_user_interruption_marker_when_flagged(
+        self,
+    ) -> None:
+        signal = InterruptedToolPassSignal(replace_interrupted_tool_pass=True)
+        context, _, collector, _, _ = await self._make_audio_collector_harness(
+            pre_speech_buffer_secs=0.10,
+            interrupted_tool_pass_signal=signal,
+        )
+        first_turn_speech = self._make_input_audio_frame(sample=101, num_frames=3)
+        second_turn_speech = self._make_input_audio_frame(sample=102, num_frames=3)
+
+        await self._drive_audio_collector(
+            collector,
+            [
+                VADUserStartedSpeakingFrame(),
+                first_turn_speech,
+                VADUserStoppedSpeakingFrame(),
+                UserStoppedSpeakingFrame(),
+                VADUserStartedSpeakingFrame(),
+                second_turn_speech,
+                VADUserStoppedSpeakingFrame(),
+                UserStoppedSpeakingFrame(),
+            ],
+        )
+
+        self.assertFalse(signal.replace_interrupted_tool_pass)
+        first_text, first_pcm = self._audio_message_text_and_pcm(context, index=0)
+        second_text, second_pcm = self._audio_message_text_and_pcm(context, index=1)
+        self.assertEqual(
+            first_text,
+            "<user_interruption></user_interruption> User audio follows.",
+        )
+        self.assertEqual(second_text, "User audio follows.")
+        self.assertEqual(first_pcm, first_turn_speech.audio)
+        self.assertEqual(second_pcm, second_turn_speech.audio)
+
+        none_context, _, none_collector, _, _ = await self._make_audio_collector_harness(
+            pre_speech_buffer_secs=0.10,
+            interrupted_tool_pass_signal=None,
+        )
+        none_signal_speech = self._make_input_audio_frame(sample=103, num_frames=3)
+        await self._drive_audio_collector(
+            none_collector,
+            [
+                VADUserStartedSpeakingFrame(),
+                none_signal_speech,
+                VADUserStoppedSpeakingFrame(),
+                UserStoppedSpeakingFrame(),
+            ],
+        )
+        none_text, none_pcm = self._audio_message_text_and_pcm(none_context)
+        self.assertEqual(none_text, "User audio follows.")
+        self.assertEqual(none_pcm, none_signal_speech.audio)
 
     def test_committed_prompt_token_ids_equal_render_of_committed_messages_without_gen_prompt(
         self,

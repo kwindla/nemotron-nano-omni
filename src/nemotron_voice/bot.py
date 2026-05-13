@@ -12,6 +12,7 @@ import copy
 import os
 import sys
 import uuid
+from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -312,6 +313,8 @@ class AudioOnlySmartTurnStopStrategy(BaseUserTurnStopStrategy):
 class UserAudioContextCollector(FrameProcessor):
     """Collect one user audio turn and append it to the shared LLM context."""
 
+    _USER_INTERRUPTION_MARKER = "<user_interruption></user_interruption> "
+
     def __init__(
         self,
         *,
@@ -320,6 +323,7 @@ class UserAudioContextCollector(FrameProcessor):
         audio_context_text: str,
         push_context_on_finish: bool = True,
         pre_speech_buffer_secs: float = 0.5,
+        interrupted_tool_pass_signal: InterruptedToolPassSignal | None = None,
     ):
         super().__init__()
         self._context = context
@@ -327,19 +331,24 @@ class UserAudioContextCollector(FrameProcessor):
         self._audio_context_text = audio_context_text
         self._push_context_on_finish = push_context_on_finish
         self._pre_speech_buffer_secs = pre_speech_buffer_secs
-        self._audio_frames: list[InputAudioRawFrame] = []
-        self._user_speaking = False
+        self._interrupted_tool_pass_signal = interrupted_tool_pass_signal
+        self._lookback_buffer: deque[tuple[InputAudioRawFrame, float]] = deque()
+        self._lookback_buffer_secs = 0.0
+        self._active_capture: list[InputAudioRawFrame] | None = None
+        self._active_capture_commit_boundary: int | None = None
 
     async def process_frame(self, frame: Frame, direction: FrameDirection):
         await super().process_frame(frame, direction)
 
-        if isinstance(frame, VADUserStartedSpeakingFrame):
-            self._user_speaking = True
+        if isinstance(frame, InputAudioRawFrame):
+            self._collect_audio_frame(frame)
+        elif isinstance(frame, VADUserStartedSpeakingFrame):
+            self._start_or_resume_active_turn()
+        elif isinstance(frame, VADUserStoppedSpeakingFrame):
+            self._record_active_turn_commit_boundary()
         elif isinstance(frame, UserStoppedSpeakingFrame):
             await self._finish_user_turn()
-        elif isinstance(frame, InputAudioRawFrame):
-            self._collect_audio_frame(frame)
-        elif isinstance(frame, (EndFrame, CancelFrame)) and self._user_speaking:
+        elif isinstance(frame, (EndFrame, CancelFrame)) and self._active_capture is not None:
             await self._finish_user_turn()
 
         await self.push_frame(frame, direction)
@@ -348,28 +357,61 @@ class UserAudioContextCollector(FrameProcessor):
         if not frame.audio:
             return
 
-        self._audio_frames.append(frame)
-        if self._user_speaking:
+        if self._active_capture is None:
+            self._append_to_lookback(frame)
             return
 
-        duration = frame.num_frames / frame.sample_rate if frame.sample_rate else 0
-        buffered_duration = duration * len(self._audio_frames)
-        while self._audio_frames and buffered_duration > self._pre_speech_buffer_secs:
-            self._audio_frames.pop(0)
-            buffered_duration -= duration
+        # Keep buffering for the entire Smart-Turn user turn, including across
+        # interim VAD pauses, until the turn controller emits UserStoppedSpeakingFrame.
+        self._active_capture.append(frame)
+
+    def _start_or_resume_active_turn(self):
+        if self._active_capture is not None:
+            return
+
+        self._active_capture = [
+            buffered_frame for buffered_frame, _duration in self._lookback_buffer
+        ]
+        self._active_capture_commit_boundary = None
+        self._clear_lookback()
+
+    def _record_active_turn_commit_boundary(self):
+        if self._active_capture is None:
+            return
+
+        self._active_capture_commit_boundary = len(self._active_capture)
 
     async def _finish_user_turn(self):
-        if not self._audio_frames:
-            self._user_speaking = False
+        if self._active_capture is None:
             return
 
-        audio_frames = list(self._audio_frames)
-        self._audio_frames.clear()
-        self._user_speaking = False
+        active_capture = self._active_capture
+        commit_boundary = self._active_capture_commit_boundary
+        if commit_boundary is None:
+            # Pipecat can finalize the turn through its watchdog timeout path
+            # without a fresh VADUserStoppedSpeakingFrame. In that fallback
+            # case, commit through the current active capture.
+            commit_boundary = len(active_capture)
+
+        audio_frames = list(active_capture[:commit_boundary])
+        lookback_tail = active_capture[commit_boundary:]
+        self._reset_active_capture()
+        self._replace_lookback_with_frames(lookback_tail)
+
+        if not audio_frames:
+            return
+
+        message_text = self._audio_context_text
+        if (
+            self._interrupted_tool_pass_signal is not None
+            and self._interrupted_tool_pass_signal.replace_interrupted_tool_pass
+        ):
+            message_text = f"{self._USER_INTERRUPTION_MARKER}{message_text}"
+            self._interrupted_tool_pass_signal.replace_interrupted_tool_pass = False
 
         await self._context.add_audio_frames_message(
             audio_frames=audio_frames,
-            text=self._audio_context_text,
+            text=message_text,
         )
         logger.debug(
             "Added user audio turn to LLM context "
@@ -377,6 +419,39 @@ class UserAudioContextCollector(FrameProcessor):
         )
         if self._push_context_on_finish:
             await self._user_aggregator.push_context_frame()
+
+    def _append_to_lookback(self, frame: InputAudioRawFrame):
+        duration_secs = self._frame_duration_secs(frame)
+        self._lookback_buffer.append((frame, duration_secs))
+        self._lookback_buffer_secs += duration_secs
+        while (
+            self._lookback_buffer
+            and self._lookback_buffer_secs > self._pre_speech_buffer_secs
+        ):
+            _, removed_duration_secs = self._lookback_buffer.popleft()
+            self._lookback_buffer_secs = max(
+                0.0, self._lookback_buffer_secs - removed_duration_secs
+            )
+
+    def _replace_lookback_with_frames(self, frames: list[InputAudioRawFrame]):
+        self._clear_lookback()
+        for frame in frames:
+            if frame.audio:
+                self._append_to_lookback(frame)
+
+    def _clear_lookback(self):
+        self._lookback_buffer.clear()
+        self._lookback_buffer_secs = 0.0
+
+    def _reset_active_capture(self):
+        self._active_capture = None
+        self._active_capture_commit_boundary = None
+
+    @staticmethod
+    def _frame_duration_secs(frame: InputAudioRawFrame) -> float:
+        if frame.sample_rate <= 0:
+            return 0.0
+        return frame.num_frames / frame.sample_rate
 
 
 class AudioOnlyLLMUserAggregator(LLMUserAggregator):
@@ -506,6 +581,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             "NEMOTRON_OMNI_PRE_SPEECH_BUFFER_SECS",
             0.5,
         ),
+        interrupted_tool_pass_signal=interrupted_tool_pass_signal,
     )
     pipeline = Pipeline(
         [
@@ -513,6 +589,10 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
             user_aggregator,
             ParallelPipeline(
                 [
+                    # Keep the collector in front of the LLM in this branch.
+                    # The service's inference task must stay backgrounded so
+                    # input audio keeps reaching the collector while a
+                    # completion is still in flight.
                     audio_collector,
                     llm,
                     tts,
