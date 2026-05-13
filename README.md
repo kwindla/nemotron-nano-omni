@@ -62,6 +62,7 @@ Common test entry points:
 
 - `pytest tests/test_pocket_tts_wav_streaming.py`
 - `scripts/test_vllm_conversation_prefix_cache.py`
+- `scripts/test_mamba_align_equivalence.py`
 - `scripts/smoke_step1_asr_bot.py`
 
 The platform env files provide the right defaults for model path, served model

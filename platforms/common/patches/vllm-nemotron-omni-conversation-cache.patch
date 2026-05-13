@@ -1,5 +1,5 @@
 diff --git a/tests/entrypoints/openai/chat_completion/test_serving_chat.py b/tests/entrypoints/openai/chat_completion/test_serving_chat.py
-index 39d59d2..70f178f 100644
+index 39d59d28f..70f178f90 100644
 --- a/tests/entrypoints/openai/chat_completion/test_serving_chat.py
 +++ b/tests/entrypoints/openai/chat_completion/test_serving_chat.py
 @@ -984,6 +984,65 @@ async def test_serving_chat_did_set_correct_cache_salt(model_type):
@@ -70,7 +70,7 @@ index 39d59d2..70f178f 100644
      """Test that data_parallel_rank is properly extracted from header and
 diff --git a/tests/entrypoints/openai/test_conversation_cache.py b/tests/entrypoints/openai/test_conversation_cache.py
 new file mode 100644
-index 0000000..c445059
+index 000000000..c44505941
 --- /dev/null
 +++ b/tests/entrypoints/openai/test_conversation_cache.py
 @@ -0,0 +1,1956 @@
@@ -2031,7 +2031,7 @@ index 0000000..c445059
 +        num_new_tokens=7,
 +    ) == 2
 diff --git a/tests/entrypoints/openai/test_tool_calls_serialization.py b/tests/entrypoints/openai/test_tool_calls_serialization.py
-index cedc257..eab480a 100644
+index cedc2575b..eab480ab7 100644
 --- a/tests/entrypoints/openai/test_tool_calls_serialization.py
 +++ b/tests/entrypoints/openai/test_tool_calls_serialization.py
 @@ -17,6 +17,7 @@ models because:
@@ -2074,7 +2074,7 @@ index cedc257..eab480a 100644
      """Messages without tool_calls must be handled correctly."""
      messages = [
 diff --git a/vllm/config/vllm.py b/vllm/config/vllm.py
-index f591605..bb6d7af 100644
+index f591605d0..bb6d7afd5 100644
 --- a/vllm/config/vllm.py
 +++ b/vllm/config/vllm.py
 @@ -1882,7 +1882,11 @@ class VllmConfig:
@@ -2091,7 +2091,7 @@ index f591605..bb6d7af 100644
                  "--mamba-block-size can only be set with --enable-prefix-caching"
              )
 diff --git a/vllm/engine/protocol.py b/vllm/engine/protocol.py
-index 50013a0..7d12b7f 100644
+index 50013a060..7d12b7fc8 100644
 --- a/vllm/engine/protocol.py
 +++ b/vllm/engine/protocol.py
 @@ -145,6 +145,46 @@ class EngineClient(ABC):
@@ -2142,7 +2142,7 @@ index 50013a0..7d12b7f 100644
      async def sleep(self, level: int = 1, mode: "PauseMode" = "abort") -> None:
          """Sleep the engine"""
 diff --git a/vllm/entrypoints/chat_utils.py b/vllm/entrypoints/chat_utils.py
-index bd4f29a..074b68a 100644
+index bd4f29a00..074b68a93 100644
 --- a/vllm/entrypoints/chat_utils.py
 +++ b/vllm/entrypoints/chat_utils.py
 @@ -1581,12 +1581,40 @@ def _parse_chat_message_content(
@@ -2187,7 +2187,7 @@ index bd4f29a..074b68a 100644
              tool_calls = message.get("tool_calls")
              if not isinstance(tool_calls, list):
 diff --git a/vllm/entrypoints/openai/chat_completion/api_router.py b/vllm/entrypoints/openai/chat_completion/api_router.py
-index cdaaa27..56d4256 100644
+index cdaaa27fc..56d4256f0 100644
 --- a/vllm/entrypoints/openai/chat_completion/api_router.py
 +++ b/vllm/entrypoints/openai/chat_completion/api_router.py
 @@ -6,6 +6,7 @@ from http import HTTPStatus
@@ -2223,7 +2223,7 @@ index cdaaa27..56d4256 100644
      return StreamingResponse(content=generator, media_type="text/event-stream")
  
 diff --git a/vllm/entrypoints/openai/chat_completion/protocol.py b/vllm/entrypoints/openai/chat_completion/protocol.py
-index aacac38..bf9b232 100644
+index aacac38e0..bf9b23219 100644
 --- a/vllm/entrypoints/openai/chat_completion/protocol.py
 +++ b/vllm/entrypoints/openai/chat_completion/protocol.py
 @@ -332,6 +332,37 @@ class ChatCompletionRequest(OpenAIBaseModel):
@@ -2305,7 +2305,7 @@ index aacac38..bf9b232 100644
      @classmethod
      def check_system_message_content_type(cls, data):
 diff --git a/vllm/entrypoints/openai/chat_completion/serving.py b/vllm/entrypoints/openai/chat_completion/serving.py
-index 12dc2cd..e752459 100644
+index 12dc2cd98..e752459d9 100644
 --- a/vllm/entrypoints/openai/chat_completion/serving.py
 +++ b/vllm/entrypoints/openai/chat_completion/serving.py
 @@ -2,12 +2,16 @@
@@ -3851,7 +3851,7 @@ index 12dc2cd..e752459 100644
              tool_call_info = None
 diff --git a/vllm/entrypoints/openai/conversation_cache.py b/vllm/entrypoints/openai/conversation_cache.py
 new file mode 100644
-index 0000000..b3b7092
+index 000000000..b3b709200
 --- /dev/null
 +++ b/vllm/entrypoints/openai/conversation_cache.py
 @@ -0,0 +1,240 @@
@@ -4096,7 +4096,7 @@ index 0000000..b3b7092
 +    ) -> ConversationCacheKey:
 +        return ConversationCacheKey(conversation_id=conversation_id)
 diff --git a/vllm/entrypoints/openai/engine/protocol.py b/vllm/entrypoints/openai/engine/protocol.py
-index 8f6cdb3..4995451 100644
+index 8f6cdb3e6..499545190 100644
 --- a/vllm/entrypoints/openai/engine/protocol.py
 +++ b/vllm/entrypoints/openai/engine/protocol.py
 @@ -265,6 +265,13 @@ class DeltaMessage(OpenAIBaseModel):
@@ -4116,7 +4116,7 @@ index 8f6cdb3..4995451 100644
 +        self.err_type = err_type
 +        self.status_code = status_code
 diff --git a/vllm/entrypoints/openai/engine/serving.py b/vllm/entrypoints/openai/engine/serving.py
-index d5fb5e1..f225935 100644
+index d5fb5e137..f225935ab 100644
 --- a/vllm/entrypoints/openai/engine/serving.py
 +++ b/vllm/entrypoints/openai/engine/serving.py
 @@ -382,9 +382,23 @@ class OpenAIServing:
@@ -4154,7 +4154,7 @@ index d5fb5e1..f225935 100644
          )
  
 diff --git a/vllm/entrypoints/openai/generate/api_router.py b/vllm/entrypoints/openai/generate/api_router.py
-index 9a64db9..96d6161 100644
+index 9a64db929..96d6161ae 100644
 --- a/vllm/entrypoints/openai/generate/api_router.py
 +++ b/vllm/entrypoints/openai/generate/api_router.py
 @@ -56,6 +56,9 @@ async def init_generate_state(
@@ -4185,7 +4185,7 @@ index 9a64db9..96d6161 100644
      state.openai_serving_chat = (
          OpenAIServingChat(**_chat_kwargs) if "generate" in supported_tasks else None
 diff --git a/vllm/entrypoints/serve/render/serving.py b/vllm/entrypoints/serve/render/serving.py
-index 32c3351..7ea8eaa 100644
+index 32c3351ce..7ea8eaae7 100644
 --- a/vllm/entrypoints/serve/render/serving.py
 +++ b/vllm/entrypoints/serve/render/serving.py
 @@ -1,5 +1,6 @@
@@ -4409,7 +4409,7 @@ index 32c3351..7ea8eaa 100644
              },
              skip_mm_cache=skip_mm_cache,
 diff --git a/vllm/envs.py b/vllm/envs.py
-index 806aed2..09795a0 100755
+index 806aed2a0..09795a029 100755
 --- a/vllm/envs.py
 +++ b/vllm/envs.py
 @@ -225,6 +225,13 @@ if TYPE_CHECKING:
@@ -4462,7 +4462,7 @@ index 806aed2..09795a0 100755
      # If enabled, returns an error message to the model to retry
      # If disabled (default), raises an exception and fails the request
 diff --git a/vllm/inputs/engine.py b/vllm/inputs/engine.py
-index 2b426eb..fbff544 100644
+index 2b426eba8..fbff5440f 100644
 --- a/vllm/inputs/engine.py
 +++ b/vllm/inputs/engine.py
 @@ -25,6 +25,9 @@ class _InputOptions(TypedDict):
@@ -4545,7 +4545,7 @@ index 2b426eb..fbff544 100644
      return EncoderDecoderInput(
          type="enc_dec",
 diff --git a/vllm/inputs/llm.py b/vllm/inputs/llm.py
-index ff22af8..f675b91 100644
+index ff22af819..f675b91b2 100644
 --- a/vllm/inputs/llm.py
 +++ b/vllm/inputs/llm.py
 @@ -95,6 +95,11 @@ class _PromptOptions(TypedDict):
@@ -4561,7 +4561,7 @@ index ff22af8..f675b91 100644
  class TextPrompt(_PromptOptions):
      """Schema for a text prompt."""
 diff --git a/vllm/inputs/preprocess.py b/vllm/inputs/preprocess.py
-index 7722014..2025543 100644
+index 7722014f9..20255436b 100644
 --- a/vllm/inputs/preprocess.py
 +++ b/vllm/inputs/preprocess.py
 @@ -155,6 +155,8 @@ class InputPreprocessor:
@@ -4583,7 +4583,7 @@ index 7722014..2025543 100644
          return inputs
  
 diff --git a/vllm/model_executor/models/config.py b/vllm/model_executor/models/config.py
-index e8f5101..784334f 100644
+index e8f5101b5..784334fb1 100644
 --- a/vllm/model_executor/models/config.py
 +++ b/vllm/model_executor/models/config.py
 @@ -397,13 +397,26 @@ class MambaModelConfig(VerifyAndUpdateConfig):
@@ -4620,7 +4620,7 @@ index e8f5101..784334f 100644
  
  class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
 diff --git a/vllm/multimodal/parse.py b/vllm/multimodal/parse.py
-index f2187ef..588c0c3 100644
+index f2187effa..588c0c357 100644
 --- a/vllm/multimodal/parse.py
 +++ b/vllm/multimodal/parse.py
 @@ -14,6 +14,12 @@ from typing import (
@@ -4716,7 +4716,7 @@ index f2187ef..588c0c3 100644
  
          return AudioProcessorItems(new_audios)
 diff --git a/vllm/renderers/base.py b/vllm/renderers/base.py
-index 2f10302..ea3cbe5 100644
+index 2f10302c0..ea3cbe550 100644
 --- a/vllm/renderers/base.py
 +++ b/vllm/renderers/base.py
 @@ -740,6 +740,8 @@ class BaseRenderer(ABC, Generic[_T]):
@@ -4747,7 +4747,7 @@ index 2f10302..ea3cbe5 100644
  
 diff --git a/vllm/v1/core/conversation_cache.py b/vllm/v1/core/conversation_cache.py
 new file mode 100644
-index 0000000..366af08
+index 000000000..366af0892
 --- /dev/null
 +++ b/vllm/v1/core/conversation_cache.py
 @@ -0,0 +1,567 @@
@@ -5319,7 +5319,7 @@ index 0000000..366af08
 +        value = getattr(reason, "value", reason)
 +        return str(value)
 diff --git a/vllm/v1/core/kv_cache_manager.py b/vllm/v1/core/kv_cache_manager.py
-index 83aa26b..b555755 100644
+index 83aa26bd9..b555755bf 100644
 --- a/vllm/v1/core/kv_cache_manager.py
 +++ b/vllm/v1/core/kv_cache_manager.py
 @@ -8,10 +8,15 @@ from typing import Literal, overload
@@ -5689,7 +5689,7 @@ index 83aa26b..b555755 100644
          """Cache the blocks for the request, if enabled.
  
 diff --git a/vllm/v1/core/sched/output.py b/vllm/v1/core/sched/output.py
-index bdb97de..3bb9014 100644
+index bdb97deca..3bb901401 100644
 --- a/vllm/v1/core/sched/output.py
 +++ b/vllm/v1/core/sched/output.py
 @@ -5,6 +5,11 @@ from dataclasses import dataclass
@@ -5726,7 +5726,7 @@ index bdb97de..3bb9014 100644
      def make_empty(cls) -> "SchedulerOutput":
          return cls(
 diff --git a/vllm/v1/core/sched/scheduler.py b/vllm/v1/core/sched/scheduler.py
-index 395fa80..b89923d 100644
+index 395fa80bf..8741bd890 100644
 --- a/vllm/v1/core/sched/scheduler.py
 +++ b/vllm/v1/core/sched/scheduler.py
 @@ -1,10 +1,14 @@
@@ -5774,12 +5774,31 @@ index 395fa80..b89923d 100644
  from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
  from vllm.v1.request import Request, RequestStatus, StreamingUpdate
  from vllm.v1.spec_decode.metrics import SpecDecodingStats
-@@ -63,6 +78,49 @@ from vllm.v1.utils import record_function_or_nullcontext
+@@ -63,6 +78,68 @@ from vllm.v1.utils import record_function_or_nullcontext
  
  logger = init_logger(__name__)
  
 +CONVERSATION_CACHE_DEBUG = os.getenv("VLLM_CONVERSATION_CACHE_DEBUG") == "1"
++_SCHED_WAITING_DEBUG = os.getenv("VLLM_SCHED_WAITING_DEBUG") == "1"
 +_TRACE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]")
++
++
++def _sched_waiting_dbg(request, reason: str, **kwargs) -> None:
++    if not _SCHED_WAITING_DEBUG:
++        return
++    parts = [
++        f"req={request.request_id}",
++        f"conv={getattr(request, 'conversation_id', None)}",
++        f"gen={getattr(request, 'conversation_generation_id', None)}",
++        f"status={request.status.name if hasattr(request.status, 'name') else request.status}",
++        f"computed={request.num_computed_tokens}",
++        f"num_tokens={request.num_tokens}",
++        f"num_prompt_tokens={request.num_prompt_tokens}",
++        f"require_cache={getattr(request, 'conversation_require_cache', None)}",
++    ]
++    for k, v in kwargs.items():
++        parts.append(f"{k}={v}")
++    logger.warning("SCHED_WAITING reason=%s %s", reason, " ".join(parts))
 +
 +
 +def _write_conversation_scheduler_trace(
@@ -5824,7 +5843,7 @@ index 395fa80..b89923d 100644
  
  class Scheduler(SchedulerInterface):
      def __init__(
-@@ -120,6 +178,9 @@ class Scheduler(SchedulerInterface):
+@@ -120,6 +197,9 @@ class Scheduler(SchedulerInterface):
          # KV Connector pushes/pull of remote KVs for P/D and offloading.
          self.connector = None
          self.connector_prefix_cache_stats: PrefixCacheStats | None = None
@@ -5834,7 +5853,7 @@ index 395fa80..b89923d 100644
          self.recompute_kv_load_failures = True
          if self.vllm_config.kv_transfer_config is not None:
              assert not self.is_encoder_decoder, (
-@@ -238,6 +299,40 @@ class Scheduler(SchedulerInterface):
+@@ -238,6 +318,40 @@ class Scheduler(SchedulerInterface):
              hash_block_size=hash_block_size,
              metrics_collector=self.kv_metrics_collector,
          )
@@ -5875,7 +5894,38 @@ index 395fa80..b89923d 100644
          # Bind GPU block pool to the KV connector. This must happen after
          # kv_cache_manager is constructed so block_pool is available.
          if self.connector is not None and hasattr(
-@@ -299,6 +394,31 @@ class Scheduler(SchedulerInterface):
+@@ -256,6 +370,30 @@ class Scheduler(SchedulerInterface):
+         self.need_mamba_block_aligned_split = (
+             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+         )
++        # The conversation-cache patch's `_mamba_block_aligned_split` lets
++        # sub-block-size chunks through when the conversation-checkpoint cap
++        # would otherwise pin the chunk inside a partial block (the
++        # historical "align rounds to 0" hang). That fix is safe for the
++        # conversation cache because its terminal-state snapshot copies
++        # the request's live scratch block at the exact target position
++        # (see ``create_terminal_state_snapshot``). But it would NOT be
++        # safe for vLLM's native block-hash prefix caching, which reads
++        # the durable boundary block by content: a let-through chunk
++        # would leave that boundary block written to a Mamba state that
++        # corresponds to a mid-block position, and subsequent prefix-
++        # cache matches on a different prefix that hashes to the same
++        # block could load a stale/wrong state. Refuse this combination.
++        if (
++            self.need_mamba_block_aligned_split
++            and self.cache_config.enable_prefix_caching
++        ):
++            raise ValueError(
++                "Conversation-cache patched build does not support enabling "
++                "native prefix caching together with mamba_cache_mode='align'. "
++                "Run with --no-enable-prefix-caching; the conversation cache "
++                "uses its own explicit snapshot mechanism instead of "
++                "native block-hash matching."
++            )
+         self.perf_metrics: ModelMetrics | None = None
+         if self.log_stats and vllm_config.observability_config.enable_mfu_metrics:
+             self.perf_metrics = ModelMetrics(vllm_config)
+@@ -299,6 +437,31 @@ class Scheduler(SchedulerInterface):
  
          self._pause_state: PauseState = PauseState.UNPAUSED
  
@@ -5907,7 +5957,28 @@ index 395fa80..b89923d 100644
      def _mamba_block_aligned_split(
          self,
          request: Request,
-@@ -349,6 +469,178 @@ class Scheduler(SchedulerInterface):
+@@ -335,8 +498,18 @@ class Scheduler(SchedulerInterface):
+                 last_cache_position = max(last_cache_position - block_size, 0)
+             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
+             if num_computed_tokens_after_sched < last_cache_position:
+-                # align to block_size
+-                num_new_tokens = num_new_tokens // block_size * block_size
++                # align to block_size when there's a full block to cache; if the
++                # chunk is smaller than a block, the documented exception
++                # applies: let it through (the chunk's terminal mamba state
++                # resides in the request's live scratch block and can still be
++                # captured by a mid-block conversation-cache snapshot via
++                # create_terminal_state_snapshot). Without this, an upstream
++                # cap (e.g., _cap_conversation_checkpoint_schedule) that pulls
++                # num_new_tokens below block_size would round to zero here and
++                # the request would never advance.
++                aligned = num_new_tokens // block_size * block_size
++                if aligned > 0:
++                    num_new_tokens = aligned
+             elif (
+                 num_computed_tokens
+                 < last_cache_position
+@@ -349,6 +522,178 @@ class Scheduler(SchedulerInterface):
                  pass
          return num_new_tokens
  
@@ -6086,7 +6157,7 @@ index 395fa80..b89923d 100644
      def schedule(self) -> SchedulerOutput:
          # NOTE(woosuk) on the scheduling algorithm:
          # There's no "decoding phase" nor "prefill phase" in the scheduler.
-@@ -383,6 +675,10 @@ class Scheduler(SchedulerInterface):
+@@ -383,6 +728,10 @@ class Scheduler(SchedulerInterface):
          scheduled_timestamp = time.monotonic()
  
          self.kv_cache_manager.new_step_starts()
@@ -6097,7 +6168,7 @@ index 395fa80..b89923d 100644
  
          # First, schedule the RUNNING requests.
          req_index = 0
-@@ -419,6 +715,14 @@ class Scheduler(SchedulerInterface):
+@@ -419,6 +768,14 @@ class Scheduler(SchedulerInterface):
              num_new_tokens = min(
                  num_new_tokens, self.max_model_len - 1 - request.num_computed_tokens
              )
@@ -6112,7 +6183,7 @@ index 395fa80..b89923d 100644
  
              # Schedule encoder inputs.
              encoder_inputs_to_schedule = None
-@@ -513,6 +817,12 @@ class Scheduler(SchedulerInterface):
+@@ -513,6 +870,12 @@ class Scheduler(SchedulerInterface):
                  # Cannot schedule this request.
                  break
  
@@ -6125,21 +6196,143 @@ index 395fa80..b89923d 100644
              # Schedule the request.
              scheduled_running_reqs.append(request)
              request_id = request.request_id
-@@ -690,6 +1000,13 @@ class Scheduler(SchedulerInterface):
+@@ -570,6 +933,15 @@ class Scheduler(SchedulerInterface):
+ 
+             while (self.waiting or self.skipped_waiting) and token_budget > 0:
+                 if len(self.running) == self.max_num_running_reqs:
++                    if _SCHED_WAITING_DEBUG:
++                        logger.warning(
++                            "SCHED_WAITING reason=max_running running=%d max=%d waiting=%d skipped=%d token_budget=%d",
++                            len(self.running),
++                            self.max_num_running_reqs,
++                            len(self.waiting),
++                            len(self.skipped_waiting),
++                            token_budget,
++                        )
+                     break
+ 
+                 request_queue = self._select_waiting_queue_for_scheduling()
+@@ -587,6 +959,7 @@ class Scheduler(SchedulerInterface):
+                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
+                             request_id,
+                         )
++                    _sched_waiting_dbg(request, "blocked_status_no_promotion")
+                     request_queue.pop_request()
+                     step_skipped_waiting.prepend_request(request)
+                     continue
+@@ -602,6 +975,7 @@ class Scheduler(SchedulerInterface):
+                     )
+                 ):
+                     # Scheduling would exceed max_loras, skip.
++                    _sched_waiting_dbg(request, "lora_max")
+                     request_queue.pop_request()
+                     step_skipped_waiting.prepend_request(request)
+                     continue
+@@ -629,6 +1003,7 @@ class Scheduler(SchedulerInterface):
+                             # The request cannot be scheduled because
+                             # the KVConnector couldn't determine
+                             # the number of matched tokens.
++                            _sched_waiting_dbg(request, "kv_connector_ext_none")
+                             request_queue.pop_request()
+                             step_skipped_waiting.prepend_request(request)
+                             continue
+@@ -687,13 +1062,36 @@ class Scheduler(SchedulerInterface):
+                     ):
+                         # If chunked_prefill is disabled,
+                         # we can stop the scheduling here.
++                        _sched_waiting_dbg(
++                            request,
++                            "chunked_prefill_disabled_over_budget",
++                            num_new_tokens=num_new_tokens,
++                            token_budget=token_budget,
++                        )
                          break
  
                      num_new_tokens = min(num_new_tokens, token_budget)
++                    pre_cap_num_new_tokens = num_new_tokens
 +                    num_new_tokens = self._cap_conversation_checkpoint_schedule(
 +                        request,
 +                        num_computed_tokens,
 +                        num_new_tokens,
 +                    )
 +                    if num_new_tokens == 0:
++                        _sched_waiting_dbg(
++                            request,
++                            "conversation_checkpoint_cap_zero",
++                            pre_cap=pre_cap_num_new_tokens,
++                            num_computed_tokens=num_computed_tokens,
++                            logical_ckpt=getattr(request, "conversation_logical_checkpoint_token_count", None),
++                            ckpt_staged=getattr(request, "conversation_checkpoint_staged", None),
++                        )
 +                        break
                      assert num_new_tokens > 0
  
                      # Schedule encoder inputs.
-@@ -775,6 +1092,12 @@ class Scheduler(SchedulerInterface):
+                     if request.has_encoder_inputs:
++                        pre_enc_num_new_tokens = num_new_tokens
+                         (
+                             encoder_inputs_to_schedule,
+                             num_new_tokens,
+@@ -708,9 +1106,18 @@ class Scheduler(SchedulerInterface):
+                         )
+                         if num_new_tokens == 0:
+                             # The request cannot be scheduled.
++                            _sched_waiting_dbg(
++                                request,
++                                "encoder_budget_zero_in_waiting",
++                                pre_enc=pre_enc_num_new_tokens,
++                                encoder_compute_budget=encoder_compute_budget,
++                                new_encoder_compute_budget=new_encoder_compute_budget,
++                                num_computed_tokens=num_computed_tokens,
++                            )
+                             break
+ 
+                 if self.need_mamba_block_aligned_split:
++                    pre_mamba_num_new_tokens = num_new_tokens
+                     num_new_tokens = self._mamba_block_aligned_split(
+                         request,
+                         num_new_tokens,
+@@ -718,6 +1125,15 @@ class Scheduler(SchedulerInterface):
+                         num_external_computed_tokens,
+                     )
+                     if num_new_tokens == 0:
++                        _sched_waiting_dbg(
++                            request,
++                            "mamba_block_aligned_split_zero",
++                            pre_mamba=pre_mamba_num_new_tokens,
++                            num_computed_tokens=num_computed_tokens,
++                            num_new_local_computed_tokens=num_new_local_computed_tokens,
++                            num_external_computed_tokens=num_external_computed_tokens,
++                            block_size=self.cache_config.block_size,
++                        )
+                         break
+ 
+                 # Handles an edge case when P/D Disaggregation
+@@ -751,6 +1167,13 @@ class Scheduler(SchedulerInterface):
+                         num_encoder_tokens=num_encoder_tokens,
+                     )
+                 ):
++                    _sched_waiting_dbg(
++                        request,
++                        "reserve_full_isl_cannot_fit",
++                        num_new_tokens=num_new_tokens,
++                        num_encoder_tokens=num_encoder_tokens,
++                        num_new_local_computed_tokens=num_new_local_computed_tokens,
++                    )
+                     if request.has_encoder_inputs:
+                         self.encoder_cache_manager.free(request)
+                     break
+@@ -771,10 +1194,22 @@ class Scheduler(SchedulerInterface):
+ 
+                     # NOTE: we need to untouch the request from the encode cache
+                     # manager
++                    _sched_waiting_dbg(
++                        request,
++                        "allocate_slots_returned_none",
++                        num_new_tokens=num_new_tokens,
++                        num_encoder_tokens=num_encoder_tokens,
++                    )
+                     if request.has_encoder_inputs:
                          self.encoder_cache_manager.free(request)
                      break
  
@@ -6152,7 +6345,24 @@ index 395fa80..b89923d 100644
                  # KVTransfer: the connector uses this info to determine
                  # if a load is needed. Note that
                  # This information is used to determine if a load is
-@@ -914,11 +1237,20 @@ class Scheduler(SchedulerInterface):
+@@ -818,6 +1253,16 @@ class Scheduler(SchedulerInterface):
+                     continue
+ 
+                 self.running.append(request)
++                if _SCHED_WAITING_DEBUG and getattr(request, "conversation_id", None):
++                    logger.warning(
++                        "SCHED_WAITING reason=scheduled req=%s conv=%s gen=%s computed=%d num_new_tokens=%d num_tokens=%d",
++                        request.request_id,
++                        request.conversation_id,
++                        getattr(request, "conversation_generation_id", None),
++                        num_computed_tokens,
++                        num_new_tokens,
++                        request.num_tokens,
++                    )
+                 if self.log_stats:
+                     request.record_event(
+                         EngineCoreEventType.SCHEDULED, scheduled_timestamp
+@@ -914,11 +1359,20 @@ class Scheduler(SchedulerInterface):
          self.prev_step_scheduled_req_ids.clear()
          self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
  
@@ -6176,7 +6386,7 @@ index 395fa80..b89923d 100644
  
          scheduler_output = SchedulerOutput(
              scheduled_new_reqs=new_reqs_data,
-@@ -936,6 +1268,13 @@ class Scheduler(SchedulerInterface):
+@@ -936,6 +1390,13 @@ class Scheduler(SchedulerInterface):
              finished_req_ids=self.finished_req_ids,
              free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
              new_block_ids_to_zero=new_block_ids_to_zero,
@@ -6190,7 +6400,7 @@ index 395fa80..b89923d 100644
          )
  
          # NOTE(Kuntai): this function is designed for multiple purposes:
-@@ -1313,12 +1652,44 @@ class Scheduler(SchedulerInterface):
+@@ -1313,12 +1774,44 @@ class Scheduler(SchedulerInterface):
          num_nans_in_logits = model_runner_output.num_nans_in_logits
          kv_connector_output = model_runner_output.kv_connector_output
          cudagraph_stats = model_runner_output.cudagraph_stats
@@ -6235,7 +6445,7 @@ index 395fa80..b89923d 100644
          spec_decoding_stats: SpecDecodingStats | None = None
          kv_connector_stats: KVConnectorStats | None = (
              kv_connector_output.kv_connector_stats if kv_connector_output else None
-@@ -1438,6 +1809,7 @@ class Scheduler(SchedulerInterface):
+@@ -1438,6 +1931,7 @@ class Scheduler(SchedulerInterface):
                  finish_reason = request.get_finished_reason()
                  finished = self._handle_stopped_request(request)
                  if finished:
@@ -6243,7 +6453,7 @@ index 395fa80..b89923d 100644
                      kv_transfer_params = self._free_request(request)
  
                  if status_before_stop == RequestStatus.RUNNING:
-@@ -1755,11 +2127,393 @@ class Scheduler(SchedulerInterface):
+@@ -1755,11 +2249,393 @@ class Scheduler(SchedulerInterface):
          else:
              if request.resumable:
                  request.streaming_queue = deque()
@@ -6637,7 +6847,7 @@ index 395fa80..b89923d 100644
      def finish_requests(
          self, request_ids: str | Iterable[str] | None, finished_status: RequestStatus
      ) -> list[tuple[str, int]]:
-@@ -1846,6 +2600,184 @@ class Scheduler(SchedulerInterface):
+@@ -1846,6 +2722,184 @@ class Scheduler(SchedulerInterface):
          self.kv_cache_manager.free(request)
          del self.requests[request.request_id]
  
@@ -6822,7 +7032,7 @@ index 395fa80..b89923d 100644
      @property
      def pause_state(self) -> PauseState:
          return self._pause_state
-@@ -1866,7 +2798,9 @@ class Scheduler(SchedulerInterface):
+@@ -1866,7 +2920,9 @@ class Scheduler(SchedulerInterface):
          return num_waiting + len(self.running)
  
      def has_finished_requests(self) -> bool:
@@ -6833,7 +7043,7 @@ index 395fa80..b89923d 100644
  
      def reset_prefix_cache(
          self, reset_running_requests: bool = False, reset_connector: bool = False
-@@ -1936,6 +2870,74 @@ class Scheduler(SchedulerInterface):
+@@ -1936,6 +2992,74 @@ class Scheduler(SchedulerInterface):
          """
          self.encoder_cache_manager.reset()
  
@@ -6908,7 +7118,7 @@ index 395fa80..b89923d 100644
      def make_stats(
          self,
          spec_decoding_stats: SpecDecodingStats | None = None,
-@@ -1951,6 +2953,9 @@ class Scheduler(SchedulerInterface):
+@@ -1951,6 +3075,9 @@ class Scheduler(SchedulerInterface):
          if self.connector_prefix_cache_stats is not None:
              connector_prefix_cache_stats = self.connector_prefix_cache_stats
              self.connector_prefix_cache_stats = PrefixCacheStats()
@@ -6918,7 +7128,7 @@ index 395fa80..b89923d 100644
          eviction_events = (
              self.kv_metrics_collector.drain_events()
              if self.kv_metrics_collector is not None
-@@ -1967,6 +2972,7 @@ class Scheduler(SchedulerInterface):
+@@ -1967,6 +3094,7 @@ class Scheduler(SchedulerInterface):
              kv_cache_usage=self.kv_cache_manager.usage,
              prefix_cache_stats=prefix_cache_stats,
              connector_prefix_cache_stats=connector_prefix_cache_stats,
@@ -6927,7 +7137,7 @@ index 395fa80..b89923d 100644
              spec_decoding_stats=spec_stats,
              kv_connector_stats=connector_stats_payload,
 diff --git a/vllm/v1/core/single_type_kv_cache_manager.py b/vllm/v1/core/single_type_kv_cache_manager.py
-index 0aa08f3..9324b19 100644
+index 0aa08f358..9324b1949 100644
 --- a/vllm/v1/core/single_type_kv_cache_manager.py
 +++ b/vllm/v1/core/single_type_kv_cache_manager.py
 @@ -7,6 +7,10 @@ from collections.abc import Sequence
@@ -7252,7 +7462,7 @@ index 0aa08f3..9324b19 100644
          """
          Get the number of tokens whose mamba state are not needed anymore. Mamba only
 diff --git a/vllm/v1/engine/__init__.py b/vllm/v1/engine/__init__.py
-index d5c5dba..e79b9f7 100644
+index d5c5dba63..e79b9f762 100644
 --- a/vllm/v1/engine/__init__.py
 +++ b/vllm/v1/engine/__init__.py
 @@ -115,6 +115,11 @@ class EngineCoreRequest(
@@ -7268,7 +7478,7 @@ index d5c5dba..e79b9f7 100644
      def params(self) -> SamplingParams | PoolingParams:
          """Return the processed params (sampling or pooling)."""
 diff --git a/vllm/v1/engine/async_llm.py b/vllm/v1/engine/async_llm.py
-index 45ae416..74da5ff 100644
+index 45ae41652..74da5ff80 100644
 --- a/vllm/v1/engine/async_llm.py
 +++ b/vllm/v1/engine/async_llm.py
 @@ -894,6 +894,49 @@ class AsyncLLM(EngineClient):
@@ -7322,7 +7532,7 @@ index 45ae416..74da5ff 100644
          await self.engine_core.sleep_async(level, mode)
  
 diff --git a/vllm/v1/engine/core.py b/vllm/v1/engine/core.py
-index 36864ba..1168702 100644
+index 36864ba73..116870272 100644
 --- a/vllm/v1/engine/core.py
 +++ b/vllm/v1/engine/core.py
 @@ -626,6 +626,47 @@ class EngineCore:
@@ -7374,7 +7584,7 @@ index 36864ba..1168702 100644
          self.reset_prefix_cache(reset_running_requests=reset_running_requests)
          self.reset_mm_cache()
 diff --git a/vllm/v1/engine/core_client.py b/vllm/v1/engine/core_client.py
-index 2f2c15d..f9c5791 100644
+index 2f2c15d24..f9c5791b6 100644
 --- a/vllm/v1/engine/core_client.py
 +++ b/vllm/v1/engine/core_client.py
 @@ -155,6 +155,38 @@ class EngineCoreClient(ABC):
@@ -7659,7 +7869,7 @@ index 2f2c15d..f9c5791 100644
          await self.call_utility_async("sleep", level, mode)
  
 diff --git a/vllm/v1/engine/input_processor.py b/vllm/v1/engine/input_processor.py
-index b01163b..3e9c184 100644
+index b01163b36..3e9c18413 100644
 --- a/vllm/v1/engine/input_processor.py
 +++ b/vllm/v1/engine/input_processor.py
 @@ -371,6 +371,50 @@ class InputProcessor:
@@ -7714,7 +7924,7 @@ index b01163b..3e9c184 100644
  
      def _validate_prompt_len(
 diff --git a/vllm/v1/metrics/loggers.py b/vllm/v1/metrics/loggers.py
-index 6855efd..7bfcfdc 100644
+index 6855efd9f..7bfcfdc61 100644
 --- a/vllm/v1/metrics/loggers.py
 +++ b/vllm/v1/metrics/loggers.py
 @@ -108,6 +108,7 @@ class LoggingStatLogger(StatLoggerBase):
@@ -7790,7 +8000,7 @@ index 6855efd..7bfcfdc 100644
              if scheduler_stats.connector_prefix_cache_stats is not None:
                  self.counter_connector_prefix_cache_queries[engine_idx].inc(
 diff --git a/vllm/v1/metrics/stats.py b/vllm/v1/metrics/stats.py
-index a7a5fb7..9abcf2d 100644
+index a7a5fb7a2..9abcf2d9a 100644
 --- a/vllm/v1/metrics/stats.py
 +++ b/vllm/v1/metrics/stats.py
 @@ -142,6 +142,23 @@ class PrefixCacheStats(BaseCacheStats):
@@ -7828,7 +8038,7 @@ index a7a5fb7..9abcf2d 100644
      kv_cache_eviction_events: list[KVCacheEvictionEvent] = field(default_factory=list)
  
 diff --git a/vllm/v1/outputs.py b/vllm/v1/outputs.py
-index 1f102ec..a648eec 100644
+index 1f102ec61..a648eec4a 100644
 --- a/vllm/v1/outputs.py
 +++ b/vllm/v1/outputs.py
 @@ -9,6 +9,7 @@ import numpy as np
@@ -7851,7 +8061,7 @@ index 1f102ec..a648eec 100644
  # ModelRunnerOutput wrapper for async scheduling.
  class AsyncModelRunnerOutput(ABC):
 diff --git a/vllm/v1/request.py b/vllm/v1/request.py
-index 678d575..9a4308f 100644
+index 678d57580..9a4308f56 100644
 --- a/vllm/v1/request.py
 +++ b/vllm/v1/request.py
 @@ -74,6 +74,10 @@ class Request:
@@ -7921,7 +8131,7 @@ index 678d575..9a4308f 100644
  
      def append_output_token_ids(
 diff --git a/vllm/v1/worker/gpu_model_runner.py b/vllm/v1/worker/gpu_model_runner.py
-index a0ba47f..d5bfb3c 100644
+index a0ba47f94..d5bfb3cde 100644
 --- a/vllm/v1/worker/gpu_model_runner.py
 +++ b/vllm/v1/worker/gpu_model_runner.py
 @@ -1041,6 +1041,85 @@ class GPUModelRunner(
@@ -8051,7 +8261,7 @@ index a0ba47f..d5bfb3c 100644
                  ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
              max_num_blocks.append(max_num_blocks_per_req)
 diff --git a/vllm/v1/worker/mamba_utils.py b/vllm/v1/worker/mamba_utils.py
-index c832389..255487e 100644
+index c832389b1..255487e92 100644
 --- a/vllm/v1/worker/mamba_utils.py
 +++ b/vllm/v1/worker/mamba_utils.py
 @@ -133,6 +133,40 @@ def collect_mamba_copy_meta(

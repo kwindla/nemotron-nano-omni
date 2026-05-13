@@ -91,6 +91,17 @@ platforms/rtx5090/scripts/run_prefix_cache_smoke.sh \
   --results-json logs/rtx5090-prefix-cache-results.json
 ```
 
+Mamba block-alignment x conversation-cache coherence sweep. Constructs
+prompts at precise token counts spanning multiple mamba block boundaries
+and asserts byte-identical output between the cached and uncached paths
+at `temperature=0`. Catches any drift in the scheduler's alignment math
+or the conversation cache attach path:
+
+```bash
+platforms/rtx5090/scripts/run_mamba_align_equivalence.sh \
+  --results-json logs/rtx5090-align-equivalence.json
+```
+
 Mixed 20-turn end-to-end benchmark:
 
 ```bash
