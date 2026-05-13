@@ -1050,6 +1050,11 @@ class NemotronOmniAudioLLMService(LLMService):
                     if fingerprint_changed
                     else "non-append committed-prefix rewrite"
                 )
+                if non_append_rewrite:
+                    logger.warning(
+                        f"{self}: committed-prefix diverged before rotation: "
+                        f"{self._describe_committed_prefix_divergence(current_full)}"
+                    )
                 self._rotate_conversation_cache_projection(reason=rotation_reason)
                 request_messages = copy.deepcopy(current_full)
             elif (
@@ -1113,6 +1118,74 @@ class NemotronOmniAudioLLMService(LLMService):
                 payload[key] = value
 
         return payload, copy.deepcopy(current_full)
+
+    @staticmethod
+    def _compact_message_repr(message: Any) -> str:
+        if not isinstance(message, dict):
+            return f"<non-dict {type(message).__name__}>"
+        role = message.get("role")
+        content = message.get("content")
+        if isinstance(content, str):
+            content_repr = repr(content[:80])
+        elif isinstance(content, list):
+            parts: list[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    ptype = part.get("type")
+                    if ptype == "text":
+                        parts.append(f"text:{(part.get('text') or '')[:40]!r}")
+                    else:
+                        parts.append(str(ptype))
+                else:
+                    parts.append(f"<{type(part).__name__}>")
+            content_repr = "[" + ",".join(parts) + "]"
+        elif content is None:
+            content_repr = "None"
+        else:
+            content_repr = f"<{type(content).__name__}>"
+        extra = ""
+        if message.get("tool_calls"):
+            tc_names = [
+                (tc.get("function") or {}).get("name")
+                for tc in message["tool_calls"]
+                if isinstance(tc, dict)
+            ]
+            extra += f" tool_calls={tc_names}"
+        if message.get("tool_call_id"):
+            extra += f" tool_call_id={message.get('tool_call_id')!r}"
+        if "name" in message:
+            extra += f" name={message.get('name')!r}"
+        return f"{{role={role!r} content={content_repr}{extra}}}"
+
+    def _describe_committed_prefix_divergence(
+        self, current_full: list[dict[str, Any]]
+    ) -> str:
+        committed = self.committed_messages
+        prefix = current_full[: len(committed)]
+        diff_idx: int | None = None
+        for idx in range(min(len(committed), len(prefix))):
+            if committed[idx] != prefix[idx]:
+                diff_idx = idx
+                break
+        if diff_idx is None and len(committed) != len(prefix):
+            diff_idx = min(len(committed), len(prefix))
+        head = (
+            f"len(committed)={len(committed)} len(current_full)={len(current_full)} "
+            f"first_diff_idx={diff_idx}"
+        )
+        if diff_idx is None:
+            return head + " (no element diff -- prefix already matches?)"
+        committed_at = (
+            self._compact_message_repr(committed[diff_idx])
+            if diff_idx < len(committed)
+            else "<missing>"
+        )
+        current_at = (
+            self._compact_message_repr(current_full[diff_idx])
+            if diff_idx < len(current_full)
+            else "<missing>"
+        )
+        return f"{head} committed[{diff_idx}]={committed_at} current_full[{diff_idx}]={current_at}"
 
     def _rotate_conversation_cache_projection(self, *, reason: str) -> None:
         if self._conversation_id is None:

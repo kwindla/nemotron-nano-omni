@@ -465,28 +465,70 @@ def _validate_logs(
     require_cache_attempts = len(
         re.findall(r"completion attempt \d+ .*require_cache=True", bot_text)
     )
-    attach_count = 0
+
+    # The bot may rotate `conversation_id` mid-run (the client-authoritative cache
+    # protocol's designed fallback for a cache-shape change or a non-append
+    # committed-prefix rewrite). Each rotation's first request goes out with
+    # `conversation_require_cache` omitted, so it is *not* counted in
+    # `require_cache_attempts` -- but its attaches land under a *new* id. So the
+    # correct invariant is: across every conversation_id the bot used during this
+    # run, the total attach count equals the total require_cache attempt count.
+    rotations = re.findall(
+        r"rotating conversation_id from (\S+) to (\S+) after (.+)$",
+        bot_text,
+        flags=re.MULTILINE,
+    )
+    run_conversation_ids: list[str] = []
     if conversation_id:
-        attach_count = len(
+        run_conversation_ids.append(conversation_id)
+    for marker_cid in re.findall(
+        rf"{re.escape(CONVERSATION_ID_MARKER)}(\S+)", bot_text
+    ):
+        if marker_cid not in run_conversation_ids:
+            run_conversation_ids.append(marker_cid)
+    for old_cid, new_cid, _reason in rotations:
+        for rotation_cid in (old_cid, new_cid):
+            if rotation_cid not in run_conversation_ids:
+                run_conversation_ids.append(rotation_cid)
+    # Fall back to scraping the per-request `conversation_id=...` log lines if the
+    # markers above did not surface anything (older bot builds / partial slices).
+    if not run_conversation_ids:
+        for scraped_cid in re.findall(r"conversation_id=(pipecat-\S+)", bot_text):
+            if scraped_cid not in run_conversation_ids:
+                run_conversation_ids.append(scraped_cid)
+
+    attach_by_conversation: dict[str, int] = {}
+    for cid in run_conversation_ids:
+        attach_by_conversation[cid] = len(
             re.findall(
-                rf"Attached conversation cache for {re.escape(conversation_id)} ",
+                rf"Attached conversation cache for {re.escape(cid)} ",
                 vllm_text,
             )
         )
+    attach_count = sum(attach_by_conversation.values())
+
+    if run_conversation_ids:
         if expect_cache_attach == "always" and require_cache_attempts != attach_count:
             raise AssertionError(
                 "Cache attach count mismatch: "
-                f"require_cache_attempts={require_cache_attempts}, attach_count={attach_count}"
+                f"require_cache_attempts={require_cache_attempts}, attach_count={attach_count} "
+                f"(conversation_ids={run_conversation_ids}, "
+                f"attach_by_conversation={attach_by_conversation}, "
+                f"rotations={len(rotations)})"
             )
         if expect_cache_attach == "never" and attach_count != 0:
             raise AssertionError(
                 "Expected cache attaches to stay disabled, "
-                f"found attach_count={attach_count}"
+                f"found attach_count={attach_count} "
+                f"(attach_by_conversation={attach_by_conversation})"
             )
 
     return {
         "require_cache_attempts": require_cache_attempts,
         "attach_count": attach_count,
+        "attach_by_conversation": attach_by_conversation,
+        "conversation_ids": run_conversation_ids,
+        "conversation_rotations": len(rotations),
         "bot_completion_attempts": len(re.findall(r"completion attempt \d+", bot_text)),
     }
 
