@@ -34,24 +34,57 @@ def run(
     )
 
 
-def load_checkout_info() -> tuple[str, Path]:
+def load_checkout_info() -> tuple[str, Path, tuple[Path, ...]]:
     data = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
     checkout = data["checkouts"]["vllm-v0.20.0"]
     patch_relpath = checkout["common_patches"][0]
-    return checkout["commit"], REPO_ROOT / patch_relpath
+    platform_patches: list[Path] = []
+    seen: set[Path] = set()
+    for patch_list in checkout.get("platform_patches", {}).values():
+        for patch_relpath_item in patch_list:
+            patch_path = REPO_ROOT / patch_relpath_item
+            if patch_path not in seen:
+                seen.add(patch_path)
+                platform_patches.append(patch_path)
+    return checkout["commit"], REPO_ROOT / patch_relpath, tuple(platform_patches)
 
 
-def generate_patch(vllm_dir: Path, pinned_ref: str, patch_path: Path) -> None:
+def materialize_common_source(
+    vllm_dir: Path,
+    platform_patches: tuple[Path, ...],
+    dest: Path,
+) -> None:
+    run(["git", "clone", str(vllm_dir), str(dest)])
+    run(["rsync", "-a", "--delete", "--exclude", ".git", f"{vllm_dir}/", f"{dest}/"])
+    for patch_path in platform_patches:
+        reverse_check = subprocess.run(
+            ["git", "-C", str(dest), "apply", "--reverse", "--check", str(patch_path)],
+            check=False,
+            text=True,
+            capture_output=True,
+        )
+        if reverse_check.returncode == 0:
+            run(["git", "-C", str(dest), "apply", "--reverse", str(patch_path)])
+
+
+def generate_patch(
+    vllm_dir: Path,
+    pinned_ref: str,
+    patch_path: Path,
+    platform_patches: tuple[Path, ...],
+) -> None:
     if not (vllm_dir / ".git").exists():
         raise SystemExit(f"Missing vLLM checkout: {vllm_dir}")
 
     with tempfile.TemporaryDirectory() as tmpdir:
+        common_source = Path(tmpdir) / "vllm"
+        materialize_common_source(vllm_dir, platform_patches, common_source)
         temp_index = Path(tmpdir) / "index"
         env = {**os.environ, "GIT_INDEX_FILE": str(temp_index)}
-        run(["git", "-C", str(vllm_dir), "read-tree", pinned_ref], env=env)
-        run(["git", "-C", str(vllm_dir), "add", "-A"], env=env)
+        run(["git", "-C", str(common_source), "read-tree", pinned_ref], env=env)
+        run(["git", "-C", str(common_source), "add", "-A"], env=env)
         patch = run(
-            ["git", "-C", str(vllm_dir), "diff", "--binary", "--cached", pinned_ref],
+            ["git", "-C", str(common_source), "diff", "--binary", "--cached", pinned_ref],
             env=env,
             capture_output=True,
         ).stdout
@@ -90,6 +123,7 @@ def validate_patch(
     vllm_dir: Path,
     pinned_ref: str,
     patch_path: Path,
+    platform_patches: tuple[Path, ...],
     python_bin: Path | None,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -109,6 +143,19 @@ def validate_patch(
                 "Patch applied but required files are still missing: "
                 + ", ".join(missing)
             )
+        for platform_patch in platform_patches:
+            reverse_check = subprocess.run(
+                ["git", "-C", str(tree_dir), "apply", "--reverse", "--check", str(platform_patch)],
+                check=False,
+                text=True,
+                capture_output=True,
+            )
+            if reverse_check.returncode == 0:
+                raise SystemExit(
+                    "Common patch already includes platform patch changes from "
+                    f"{platform_patch}"
+                )
+            run(["git", "-C", str(tree_dir), "apply", "--check", str(platform_patch)])
         if python_bin is not None:
             import_check(tree_dir, python_bin)
 
@@ -134,11 +181,17 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    pinned_ref, patch_path = load_checkout_info()
+    pinned_ref, patch_path, platform_patches = load_checkout_info()
     patch_path.parent.mkdir(parents=True, exist_ok=True)
-    generate_patch(args.vllm_dir, pinned_ref, patch_path)
+    generate_patch(args.vllm_dir, pinned_ref, patch_path, platform_patches)
     if not args.no_validate:
-        validate_patch(args.vllm_dir, pinned_ref, patch_path, args.python)
+        validate_patch(
+            args.vllm_dir,
+            pinned_ref,
+            patch_path,
+            platform_patches,
+            args.python,
+        )
     print(f"Wrote {patch_path}")
     return 0
 
