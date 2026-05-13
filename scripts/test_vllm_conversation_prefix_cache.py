@@ -684,10 +684,11 @@ def run_text_suffix_only_equivalence_test(
         "codename, city, mineral, phrase, number_sum. No markdown."
     )
     suffix_only = client.chat(
-        [user(second_user)],
+        [assistant(first.content), user(second_user)],
         conversation_id=cid,
         cache_salt=salt,
         max_tokens=80,
+        extra_payload={"conversation_require_cache": True},
     )
     full_history = [user(facts), assistant(first.content), user(second_user)]
     uncached = client.chat(
@@ -805,8 +806,9 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
         extra_payload=tool_payload,
     )
     turn1_tool_call = extract_single_tool_call(turn1_first)
+    turn1_message = turn1_first.raw["choices"][0]["message"] if turn1_first.raw else {}
     turn1_final = client.chat(
-        [tool_message(turn1_tool_call["id"], f"{repo_root}\n")],
+        [turn1_message, tool_message(turn1_tool_call["id"], f"{repo_root}\n")],
         conversation_id=cid,
         cache_salt=salt,
         max_tokens=32,
@@ -818,6 +820,9 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
 
     turn2_first = client.chat(
         [
+            turn1_message,
+            tool_message(turn1_tool_call["id"], f"{repo_root}\n"),
+            assistant(turn1_final.content),
             user(
                 "Use the bash tool to run basename "
                 f"{repo_root} and report the output only."
@@ -837,7 +842,7 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
         raise TestFailure(f"expected exactly one tool call, got: {turn2_message!r}")
     turn2_tool_call = turn2_tool_calls[0]
     turn2_final = client.chat(
-        [tool_message(turn2_tool_call["id"], "nemotron-nano-omni\n")],
+        [turn2_message, tool_message(turn2_tool_call["id"], "nemotron-nano-omni\n")],
         conversation_id=cid,
         cache_salt=salt,
         max_tokens=24,
@@ -848,7 +853,12 @@ def run_tool_multiturn_cache_test(client: VllmClient, log_path: Path) -> TestRes
     )
 
     turn3_final = client.chat(
-        [user("What exact token did the previous command print? Reply with that token only.")],
+        [
+            turn2_message,
+            tool_message(turn2_tool_call["id"], "nemotron-nano-omni\n"),
+            assistant(turn2_final.content),
+            user("What exact token did the previous command print? Reply with that token only."),
+        ],
         conversation_id=cid,
         cache_salt=salt,
         max_tokens=16,
@@ -954,10 +964,11 @@ def run_audio_suffix_only_test(
         "one lowercase word."
     )
     cached = client.chat(
-        [followup],
+        [assistant(first.content), followup],
         conversation_id=cid,
         cache_salt=salt,
         max_tokens=32,
+        extra_payload={"conversation_require_cache": True},
     )
     attach = assert_attached(log_path, offset, cid)
     if "unicorn" not in cached.content.lower():
