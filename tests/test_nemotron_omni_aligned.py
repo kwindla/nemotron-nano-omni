@@ -620,41 +620,32 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         if task is not None:
             await task
 
-    def test_openai_tool_definition_shape_matches_expected_bash_tool_definition(self) -> None:
-        definition = BASH_TOOL_DEFINITION["function"]
-        parameters = definition["parameters"]
-        description = definition["description"]
+    def _function_call_frame_summary(
+        self,
+        recorded_frames: list[tuple[Any, FrameDirection]],
+    ) -> list[tuple[str, Any]]:
+        summary: list[tuple[str, Any]] = []
+        for frame, direction in recorded_frames:
+            if direction is not FrameDirection.DOWNSTREAM:
+                continue
+            if isinstance(frame, FunctionCallsStartedFrame):
+                summary.append(
+                    ("started", [call.tool_call_id for call in frame.function_calls])
+                )
+            elif isinstance(frame, FunctionCallInProgressFrame):
+                summary.append(("in_progress", frame.tool_call_id))
+            elif isinstance(frame, FunctionCallResultFrame):
+                summary.append(("result", frame.tool_call_id))
+            elif isinstance(frame, FunctionCallCancelFrame):
+                summary.append(("cancel", frame.tool_call_id))
+        return summary
 
-        self.assertIs(parameters["additionalProperties"], False)
-        self.assertIn("JSON observation object", description)
-        for field_name in (
-            "ok",
-            "status",
-            "summary",
-            "command",
-            "exit_code",
-            "timed_out",
-            "stdout",
-            "stderr",
-        ):
-            self.assertIn(field_name, description)
-        self.assertIn("duplicate_suppressed", description)
-        self.assertIn("round_limit_reached", description)
-
-    def test_bot_builds_tools_schema_context_only_when_bash_tool_enabled(self) -> None:
-        enabled_context = _build_llm_context(enable_bash_tool=True)
-        disabled_context = _build_llm_context(enable_bash_tool=False)
-
-        self.assertIsInstance(enabled_context.tools, ToolsSchema)
-        self.assertEqual(enabled_context.tool_choice, "auto")
-        self.assertEqual(enabled_context.tools.standard_tools, [])
-        self.assertIn(AdapterType.OPENAI, enabled_context.tools.custom_tools or {})
-        custom_tools = enabled_context.tools.custom_tools or {}
-        self.assertEqual(custom_tools[AdapterType.OPENAI][0], BASH_TOOL_DEFINITION)
-        self.assertIsNot(custom_tools[AdapterType.OPENAI][0], BASH_TOOL_DEFINITION)
-
-        self.assertIs(disabled_context.tools, NOT_GIVEN)
-        self.assertIs(disabled_context.tool_choice, NOT_GIVEN)
+    # ============================================================================
+    # Layer 1 — Pipecat / Nemotron behavior
+    # Shared LLMContext is the source of truth for the service, assistant
+    # aggregator, sync-tool lifecycle, interruption handling, routing, and audio
+    # collector behavior from steps 2-4 and 7.
+    # ============================================================================
 
     async def test_response_lifecycle_frames_pair_under_supersession(self) -> None:
         service = self._make_service()
@@ -728,146 +719,6 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 "LLMFullResponseEndFrame",
             ],
         )
-
-    async def test_developer_messages_follow_openai_adapter_policy_and_downgrade_to_user_not_system(
-        self,
-    ) -> None:
-        context = self._context_with_messages(
-            [
-                {"role": "developer", "content": "Developer instructions stay user-visible."},
-                {"role": "user", "content": "What should I do next?"},
-            ]
-        )
-        service = self._make_service(system_instruction="service system")
-        self._attach_assistant(service, context)
-        payloads: list[dict[str, Any]] = []
-
-        async def fake_stream(payload, **kwargs):
-            payloads.append(copy.deepcopy(payload))
-            await service._push_llm_text("Answer")
-            return ChatCompletionPassResult(output_text="Answer", tool_calls=[], first_token=False)
-
-        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
-        await self._run_context_frame(service, context)
-
-        developer_rows = [
-            message
-            for message in payloads[0]["messages"]
-            if message.get("content") == "Developer instructions stay user-visible."
-        ]
-        self.assertEqual(
-            developer_rows,
-            [{"role": "user", "content": "Developer instructions stay user-visible."}],
-        )
-        self.assertNotIn(
-            {
-                "role": "system",
-                "content": "Developer instructions stay user-visible.",
-            },
-            payloads[0]["messages"],
-        )
-
-    async def test_system_instruction_injection_stays_separate_from_developer_message_normalization(
-        self,
-    ) -> None:
-        context = self._context_with_messages(
-            [
-                {"role": "developer", "content": "Developer policy."},
-                {"role": "user", "content": "Question"},
-            ]
-        )
-        service = self._make_service(system_instruction="service-level system instruction")
-        self._attach_assistant(service, context)
-        payloads: list[dict[str, Any]] = []
-
-        async def fake_stream(payload, **kwargs):
-            payloads.append(copy.deepcopy(payload))
-            await service._push_llm_text("Answer")
-            return ChatCompletionPassResult(output_text="Answer", tool_calls=[], first_token=False)
-
-        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
-        await self._run_context_frame(service, context)
-
-        self.assertEqual(
-            payloads[0]["messages"][0],
-            {"role": "system", "content": "service-level system instruction"},
-        )
-        self.assertIn(
-            {"role": "user", "content": "Developer policy."},
-            payloads[0]["messages"],
-        )
-
-    async def test_matching_llm_specific_messages_are_unwrapped_and_nonmatching_ones_are_excluded(
-        self,
-    ) -> None:
-        anthropic_message = LLMSpecificMessage(
-            llm="anthropic",
-            message={"role": "assistant", "content": "Anthropic-only prompt row."},
-        )
-        openai_message = LLMSpecificMessage(
-            llm="openai",
-            message={"role": "assistant", "content": "OpenAI-only prompt row."},
-        )
-        context = self._context_with_messages(
-            [
-                {"role": "user", "content": "Standard user row."},
-                anthropic_message,
-                openai_message,
-                {"role": "user", "content": "Final user row."},
-            ]
-        )
-        service = self._make_service(system_instruction="service system")
-        self._attach_assistant(service, context)
-        payloads: list[dict[str, Any]] = []
-        traces: list[dict[str, Any]] = []
-
-        def capture_trace(*, trace_id: str, phase: str, payload: dict[str, Any]) -> None:
-            traces.append({"trace_id": trace_id, "phase": phase, "payload": copy.deepcopy(payload)})
-
-        async def fake_stream(payload, **kwargs):
-            payloads.append(copy.deepcopy(payload))
-            await service._push_llm_text("Answer")
-            return ChatCompletionPassResult(output_text="Answer", tool_calls=[], first_token=False)
-
-        service._write_trace_file = capture_trace  # type: ignore[method-assign]
-        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
-        await self._run_context_frame(service, context)
-
-        prompt_messages = payloads[0]["messages"]
-        self.assertIn(
-            {"role": "assistant", "content": "OpenAI-only prompt row."},
-            prompt_messages,
-        )
-        self.assertNotIn(
-            {"role": "assistant", "content": "Anthropic-only prompt row."},
-            prompt_messages,
-        )
-        self.assertIn(anthropic_message, context.get_messages())
-        self.assertIn(openai_message, context.get_messages())
-
-        request_traces = [trace for trace in traces if trace["phase"] == "client-request"]
-        self.assertEqual(len(request_traces), 1)
-        self.assertEqual(
-            request_traces[0]["payload"]["conversation_full_messages"],
-            prompt_messages,
-        )
-
-    async def test_tools_and_tool_choice_are_omitted_when_provider_tools_empty(self) -> None:
-        context = LLMContext(messages=[{"role": "user", "content": "No tools this turn."}])
-        service = self._make_service(enable_bash_tool=False, system_instruction="service system")
-        self._attach_assistant(service, context)
-        payloads: list[dict[str, Any]] = []
-
-        async def fake_stream(payload, **kwargs):
-            payloads.append(copy.deepcopy(payload))
-            await service._push_llm_text("Answer")
-            return ChatCompletionPassResult(output_text="Answer", tool_calls=[], first_token=False)
-
-        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
-        await self._run_context_frame(service, context)
-
-        self.assertNotIn("tools", payloads[0])
-        self.assertNotIn("tool_choice", payloads[0])
 
     async def test_one_turn_text_response(self) -> None:
         context = self._context_with_messages([{"role": "user", "content": "Hello"}])
@@ -1018,6 +869,18 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(execution_order, ["pwd", "ls", "whoami"])
         self.assertEqual(followup_order_snapshot, ["pwd", "ls", "whoami"])
         self.assertEqual(len(payloads), 2)
+        self.assertEqual(
+            self._function_call_frame_summary(service_frames),
+            [
+                ("started", ["call_1", "call_2", "call_3"]),
+                ("in_progress", "call_1"),
+                ("result", "call_1"),
+                ("in_progress", "call_2"),
+                ("result", "call_2"),
+                ("in_progress", "call_3"),
+                ("result", "call_3"),
+            ],
+        )
         self.assertEqual([frame.run_llm for frame in tool_result_frames], [False, False, True])
 
     async def test_sync_tool_round_round_trip(self) -> None:
@@ -1128,6 +991,16 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(
             {"role": "assistant", "content": "Checking the workspace."},
             context.get_messages(),
+        )
+        self.assertEqual(
+            self._function_call_frame_summary(service_frames),
+            [
+                ("started", ["call_1", "call_2"]),
+                ("in_progress", "call_1"),
+                ("result", "call_1"),
+                ("in_progress", "call_2"),
+                ("result", "call_2"),
+            ],
         )
         self.assertTrue(all(row["content"] != "IN_PROGRESS" for row in tool_rows))
         self.assertEqual(
@@ -1434,11 +1307,22 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
             {tool_call_id for batch in cancelled_batches for tool_call_id in batch},
             {"call_1", "call_2", "call_3"},
         )
+        self.assertEqual(
+            self._function_call_frame_summary(service_frames),
+            [
+                ("started", ["call_1", "call_2", "call_3"]),
+                ("in_progress", "call_1"),
+                ("cancel", "call_1"),
+                ("cancel", "call_2"),
+                ("cancel", "call_3"),
+            ],
+        )
 
     async def test_stale_queued_sync_tool_cancellation_fires_on_function_calls_cancelled(self) -> None:
         service = self._make_service()
         await self._prime_service_for_tools(service)
         context = self._context_with_messages([{"role": "user", "content": "Cancel queued work."}])
+        _, service_frames, _ = self._attach_assistant(service, context)
         started = asyncio.Event()
         queued_cancel_batch: list[str] = []
 
@@ -1484,6 +1368,16 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         await started.wait()
         await service.process_frame(InterruptionFrame(), FrameDirection.DOWNSTREAM)
         await self._wait_until(lambda: queued_cancel_batch == ["call_2", "call_3"])
+        self.assertEqual(
+            self._function_call_frame_summary(service_frames),
+            [
+                ("started", ["call_1", "call_2", "call_3"]),
+                ("in_progress", "call_1"),
+                ("cancel", "call_1"),
+                ("cancel", "call_2"),
+                ("cancel", "call_3"),
+            ],
+        )
 
     async def test_function_call_cancel_during_provisional_pass_drops_staged_batch_and_clears_in_progress(
         self,
@@ -1921,6 +1815,189 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 {"role": "user", "content": "Second turn"},
             ],
         )
+
+    # ============================================================================
+    # Layer 2 — vLLM serving / ledger
+    # Client-authoritative committed_messages tests live here. The nested vLLM
+    # publish/render/rebase cases stay in
+    # vllm-v0.20.0/tests/entrypoints/openai/test_conversation_cache.py.
+    # ============================================================================
+
+    def test_openai_tool_definition_shape_matches_expected_bash_tool_definition(self) -> None:
+        definition = BASH_TOOL_DEFINITION["function"]
+        parameters = definition["parameters"]
+        description = definition["description"]
+
+        self.assertIs(parameters["additionalProperties"], False)
+        self.assertIn("JSON observation object", description)
+        for field_name in (
+            "ok",
+            "status",
+            "summary",
+            "command",
+            "exit_code",
+            "timed_out",
+            "stdout",
+            "stderr",
+        ):
+            self.assertIn(field_name, description)
+        self.assertIn("duplicate_suppressed", description)
+        self.assertIn("round_limit_reached", description)
+
+    def test_bot_builds_tools_schema_context_only_when_bash_tool_enabled(self) -> None:
+        enabled_context = _build_llm_context(enable_bash_tool=True)
+        disabled_context = _build_llm_context(enable_bash_tool=False)
+
+        self.assertIsInstance(enabled_context.tools, ToolsSchema)
+        self.assertEqual(enabled_context.tool_choice, "auto")
+        self.assertEqual(enabled_context.tools.standard_tools, [])
+        self.assertIn(AdapterType.OPENAI, enabled_context.tools.custom_tools or {})
+        custom_tools = enabled_context.tools.custom_tools or {}
+        self.assertEqual(custom_tools[AdapterType.OPENAI][0], BASH_TOOL_DEFINITION)
+        self.assertIsNot(custom_tools[AdapterType.OPENAI][0], BASH_TOOL_DEFINITION)
+
+        self.assertIs(disabled_context.tools, NOT_GIVEN)
+        self.assertIs(disabled_context.tool_choice, NOT_GIVEN)
+
+    async def test_developer_messages_follow_openai_adapter_policy_and_downgrade_to_user_not_system(
+        self,
+    ) -> None:
+        context = self._context_with_messages(
+            [
+                {"role": "developer", "content": "Developer instructions stay user-visible."},
+                {"role": "user", "content": "What should I do next?"},
+            ]
+        )
+        service = self._make_service(system_instruction="service system")
+        self._attach_assistant(service, context)
+        payloads: list[dict[str, Any]] = []
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            await service._push_llm_text("Answer")
+            return ChatCompletionPassResult(output_text="Answer", tool_calls=[], first_token=False)
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        await self._run_context_frame(service, context)
+
+        developer_rows = [
+            message
+            for message in payloads[0]["messages"]
+            if message.get("content") == "Developer instructions stay user-visible."
+        ]
+        self.assertEqual(
+            developer_rows,
+            [{"role": "user", "content": "Developer instructions stay user-visible."}],
+        )
+        self.assertNotIn(
+            {
+                "role": "system",
+                "content": "Developer instructions stay user-visible.",
+            },
+            payloads[0]["messages"],
+        )
+
+    async def test_system_instruction_injection_stays_separate_from_developer_message_normalization(
+        self,
+    ) -> None:
+        context = self._context_with_messages(
+            [
+                {"role": "developer", "content": "Developer policy."},
+                {"role": "user", "content": "Question"},
+            ]
+        )
+        service = self._make_service(system_instruction="service-level system instruction")
+        self._attach_assistant(service, context)
+        payloads: list[dict[str, Any]] = []
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            await service._push_llm_text("Answer")
+            return ChatCompletionPassResult(output_text="Answer", tool_calls=[], first_token=False)
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        await self._run_context_frame(service, context)
+
+        self.assertEqual(
+            payloads[0]["messages"][0],
+            {"role": "system", "content": "service-level system instruction"},
+        )
+        self.assertIn(
+            {"role": "user", "content": "Developer policy."},
+            payloads[0]["messages"],
+        )
+
+    async def test_matching_llm_specific_messages_are_unwrapped_and_nonmatching_ones_are_excluded(
+        self,
+    ) -> None:
+        anthropic_message = LLMSpecificMessage(
+            llm="anthropic",
+            message={"role": "assistant", "content": "Anthropic-only prompt row."},
+        )
+        openai_message = LLMSpecificMessage(
+            llm="openai",
+            message={"role": "assistant", "content": "OpenAI-only prompt row."},
+        )
+        context = self._context_with_messages(
+            [
+                {"role": "user", "content": "Standard user row."},
+                anthropic_message,
+                openai_message,
+                {"role": "user", "content": "Final user row."},
+            ]
+        )
+        service = self._make_service(system_instruction="service system")
+        self._attach_assistant(service, context)
+        payloads: list[dict[str, Any]] = []
+        traces: list[dict[str, Any]] = []
+
+        def capture_trace(*, trace_id: str, phase: str, payload: dict[str, Any]) -> None:
+            traces.append({"trace_id": trace_id, "phase": phase, "payload": copy.deepcopy(payload)})
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            await service._push_llm_text("Answer")
+            return ChatCompletionPassResult(output_text="Answer", tool_calls=[], first_token=False)
+
+        service._write_trace_file = capture_trace  # type: ignore[method-assign]
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        await self._run_context_frame(service, context)
+
+        prompt_messages = payloads[0]["messages"]
+        self.assertIn(
+            {"role": "assistant", "content": "OpenAI-only prompt row."},
+            prompt_messages,
+        )
+        self.assertNotIn(
+            {"role": "assistant", "content": "Anthropic-only prompt row."},
+            prompt_messages,
+        )
+        self.assertIn(anthropic_message, context.get_messages())
+        self.assertIn(openai_message, context.get_messages())
+
+        request_traces = [trace for trace in traces if trace["phase"] == "client-request"]
+        self.assertEqual(len(request_traces), 1)
+        self.assertEqual(
+            request_traces[0]["payload"]["conversation_full_messages"],
+            prompt_messages,
+        )
+
+    async def test_tools_and_tool_choice_are_omitted_when_provider_tools_empty(self) -> None:
+        context = LLMContext(messages=[{"role": "user", "content": "No tools this turn."}])
+        service = self._make_service(enable_bash_tool=False, system_instruction="service system")
+        self._attach_assistant(service, context)
+        payloads: list[dict[str, Any]] = []
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            await service._push_llm_text("Answer")
+            return ChatCompletionPassResult(output_text="Answer", tool_calls=[], first_token=False)
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        await self._run_context_frame(service, context)
+
+        self.assertNotIn("tools", payloads[0])
+        self.assertNotIn("tool_choice", payloads[0])
 
     async def test_cached_next_turn_payload_after_committed_turn_uses_assistant_plus_user_suffix_under_client_authoritative_protocol(
         self,
@@ -3235,6 +3312,28 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 for frame, direction in recorded_output_frames
             )
         )
+        self.assertEqual(
+            [
+                (type(frame).__name__, getattr(frame, "tool_call_id", None))
+                for frame, direction in recorded_output_frames
+                if direction is FrameDirection.DOWNSTREAM
+                and isinstance(
+                    frame,
+                    (
+                        FunctionCallsStartedFrame,
+                        FunctionCallInProgressFrame,
+                        FunctionCallResultFrame,
+                    ),
+                )
+            ],
+            [
+                ("FunctionCallsStartedFrame", None),
+                ("FunctionCallInProgressFrame", "call_1"),
+                ("FunctionCallResultFrame", "call_1"),
+                ("FunctionCallInProgressFrame", "call_2"),
+                ("FunctionCallResultFrame", "call_2"),
+            ],
+        )
 
     async def test_audio_collector_preserves_full_lookback_with_variable_frame_sizes(
         self,
@@ -3474,6 +3573,13 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         none_text, none_pcm = self._audio_message_text_and_pcm(none_context)
         self.assertEqual(none_text, "User audio follows.")
         self.assertEqual(none_pcm, none_signal_speech.audio)
+
+    # ============================================================================
+    # Layer 3 — prompt-side exactness / physical attach
+    # The aligned suite keeps the real tokenizer/chat-template prefix checks
+    # here; the pure attach/self-check/rebase mechanics live in the nested vLLM
+    # conversation-cache test module.
+    # ============================================================================
 
     def test_committed_prompt_token_ids_equal_render_of_committed_messages_without_gen_prompt(
         self,

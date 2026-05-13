@@ -1,3 +1,20 @@
+"""Helper-only coverage for Nemotron conversation-cache-related utilities.
+
+This module intentionally covers only helper surfaces:
+- `_convert_context_message`-related adapter/provider normalization helpers
+- `_strip_historical_audio_from_messages`
+- `_build_bash_tool_result`
+- bash argument validation and prose-echo rejection
+- duplicate suppression for repeated bash calls within one user turn
+- subprocess timeout and cancellation cleanup
+- the HTTP 409 `ConversationCacheMissError` parser
+- the historical-audio-stripping default
+
+Integration behavior for `committed_messages` as the client-acknowledged
+prefix, including suffix projection, tool-followup shapes, rebases, and
+rotation, is owned by `tests/test_nemotron_omni_aligned.py`.
+"""
+
 import asyncio
 import copy
 import json
@@ -186,7 +203,7 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    def test_build_bash_tool_result_returns_fixed_field_contract(self) -> None:
+    def test_sync_tool_result_json_contract(self) -> None:
         service = self._make_service()
         result = service._build_bash_tool_result(
             command="pwd",
@@ -273,7 +290,44 @@ class NemotronOmniConversationCacheTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result, tool_result)
         self.assertEqual(seen_calls, [("echo spark audio one", "call_1")])
 
-    async def test_execute_bash_tool_request_suppresses_exact_duplicates_within_one_turn(self) -> None:
+    async def test_dedup_result_uses_reserved_status(self) -> None:
+        service = self._make_service()
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return {
+                "ok": True,
+                "status": "success",
+                "summary": "Command completed successfully.",
+                "command": code,
+                "exit_code": 0,
+                "timed_out": False,
+                "stdout": "tool result",
+                "stderr": "",
+            }
+
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        service._reset_turn_tool_state("turn-1")
+
+        first = await service._execute_bash_tool_request(
+            arguments={"code": "pwd"},
+            tool_call_id="call_1",
+            function_name="run_bash",
+        )
+        duplicate = await service._execute_bash_tool_request(
+            arguments={"code": "pwd"},
+            tool_call_id="call_2",
+            function_name="run_bash",
+        )
+
+        self.assertEqual(first["status"], "success")
+        self.assertEqual(duplicate["status"], "duplicate_suppressed")
+        self.assertEqual(duplicate["command"], first["command"])
+        self.assertEqual(duplicate["stdout"], first["stdout"])
+        self.assertEqual(duplicate["stderr"], first["stderr"])
+        self.assertEqual(duplicate["exit_code"], first["exit_code"])
+        self.assertEqual(duplicate["timed_out"], first["timed_out"])
+
+    async def test_duplicate_bash_call_within_one_turn_uses_dedup_handler_path(self) -> None:
         service = self._make_service()
         events: list[dict[str, object]] = []
         seen_calls: list[str] = []
