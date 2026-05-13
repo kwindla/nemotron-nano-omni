@@ -1,7 +1,9 @@
 import asyncio
 import contextlib
 import copy
+import functools
 import json
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -36,6 +38,12 @@ from pipecat.transports.base_transport import TransportParams
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_VLLM_PROJECT_ROOT = _REPO_ROOT / "vllm-v0.20.0"
+_NEMOTRON_MODEL_DIR = (
+    _REPO_ROOT / "models" / "Nemotron-3-Nano-Omni-30B-A3B-Reasoning-NVFP4"
+)
+
 from nemotron_voice.bot import (  # noqa: E402
     AudioOnlyLLMUserAggregator,
     UserAudioContextCollector,
@@ -51,6 +59,95 @@ from nemotron_voice.services.nvidia.nemotron_omni import (  # noqa: E402
     NemotronExactAssistantMessageFrame,
     NemotronOmniAudioLLMService,
 )
+
+
+def _vllm_render_runner_command() -> list[str]:
+    project_python = _VLLM_PROJECT_ROOT / ".venv" / "bin" / "python"
+    if project_python.exists():
+        return [str(project_python), "-"]
+    return ["uv", "run", "python", "-"]
+
+
+@functools.lru_cache(maxsize=32)
+def _render_nemotron_tokens_via_vllm_subprocess(
+    messages_json: str,
+    add_generation_prompt: bool,
+    tools_json: str | None,
+    chat_template_kwargs_json: str,
+) -> tuple[int, ...]:
+    script = f"""
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, {json.dumps(str(_VLLM_PROJECT_ROOT))})
+
+from transformers import AutoTokenizer
+from vllm.entrypoints.chat_utils import _postprocess_messages
+
+model_dir = Path({json.dumps(str(_NEMOTRON_MODEL_DIR))})
+messages = json.loads({messages_json!r})
+tools_json = {tools_json!r}
+tools = json.loads(tools_json) if tools_json is not None else None
+chat_template_kwargs = json.loads({chat_template_kwargs_json!r})
+
+_postprocess_messages(messages)
+tokenizer = AutoTokenizer.from_pretrained(
+    str(model_dir),
+    trust_remote_code=True,
+    fix_mistral_regex=True,
+)
+chat_template = (model_dir / "chat_template.jinja").read_text(encoding="utf-8")
+token_ids = tokenizer.apply_chat_template(
+    conversation=messages,
+    tools=tools,
+    chat_template=chat_template,
+    tokenize=True,
+    return_dict=False,
+    add_generation_prompt={str(add_generation_prompt)},
+    **chat_template_kwargs,
+)
+print(json.dumps(token_ids))
+""".strip()
+
+    completed = subprocess.run(
+        _vllm_render_runner_command(),
+        cwd=_VLLM_PROJECT_ROOT,
+        input=script,
+        text=True,
+        capture_output=True,
+        timeout=900,
+        check=False,
+    )
+    if completed.returncode != 0:
+        raise unittest.SkipTest(
+            "Nemotron tokenizer/chat-template render helper unavailable in this env: "
+            f"{completed.stderr.strip() or completed.stdout.strip() or completed.returncode}"
+        )
+    return tuple(json.loads(completed.stdout.strip()))
+
+
+def _render_nemotron_tokens(
+    messages: list[dict[str, Any]],
+    *,
+    add_generation_prompt: bool,
+    tools: list[dict[str, Any]] | None = None,
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> tuple[int, ...]:
+    return _render_nemotron_tokens_via_vllm_subprocess(
+        json.dumps(messages, ensure_ascii=True, sort_keys=True),
+        add_generation_prompt,
+        (
+            json.dumps(tools, ensure_ascii=True, sort_keys=True)
+            if tools is not None
+            else None
+        ),
+        json.dumps(
+            chat_template_kwargs or {"enable_thinking": False},
+            ensure_ascii=True,
+            sort_keys=True,
+        ),
+    )
 
 
 class _DummySession:
@@ -3042,6 +3139,133 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 for frame, direction in recorded_output_frames
             )
         )
+
+    def test_committed_prompt_token_ids_equal_render_of_committed_messages_without_gen_prompt(
+        self,
+    ) -> None:
+        tools = [copy.deepcopy(BASH_TOOL_DEFINITION)]
+        committed_messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "First turn"},
+            {"role": "assistant", "content": "First answer"},
+        ]
+        next_turn_messages = [
+            *committed_messages,
+            {"role": "user", "content": "Second turn"},
+        ]
+
+        committed_prompt_token_ids = _render_nemotron_tokens(
+            committed_messages,
+            add_generation_prompt=False,
+            tools=tools,
+        )
+        next_turn_prompt_token_ids = _render_nemotron_tokens(
+            next_turn_messages,
+            add_generation_prompt=True,
+            tools=tools,
+        )
+
+        self.assertEqual(
+            next_turn_prompt_token_ids[: len(committed_prompt_token_ids)],
+            committed_prompt_token_ids,
+        )
+
+    def test_chat_template_renders_each_message_independently_of_later_messages(
+        self,
+    ) -> None:
+        tools = [copy.deepcopy(BASH_TOOL_DEFINITION)]
+        messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Run pwd"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "tool-1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_bash",
+                            "arguments": '{"code":"pwd"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tool-1",
+                "name": "run_bash",
+                "content": '{"ok":true,"status":"success","stdout":"/tmp\\n"}',
+            },
+            {"role": "assistant", "content": "/tmp"},
+            {"role": "user", "content": "What exact path did it print?"},
+        ]
+        full_prompt_token_ids = _render_nemotron_tokens(
+            messages,
+            add_generation_prompt=True,
+            tools=tools,
+        )
+
+        for prefix_len in range(1, len(messages) + 1):
+            with self.subTest(prefix_len=prefix_len):
+                prefix_prompt_token_ids = _render_nemotron_tokens(
+                    messages[:prefix_len],
+                    add_generation_prompt=False,
+                    tools=tools,
+                )
+                self.assertEqual(
+                    full_prompt_token_ids[: len(prefix_prompt_token_ids)],
+                    prefix_prompt_token_ids,
+                )
+
+    def test_assistant_and_tool_call_history_round_trips_to_generation_tokens(
+        self,
+    ) -> None:
+        tools = [copy.deepcopy(BASH_TOOL_DEFINITION)]
+        openai_style_messages = [
+            {"role": "system", "content": "sys"},
+            {"role": "user", "content": "Run pwd"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "tool-1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_bash",
+                            "arguments": '{"code":"pwd"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tool-1",
+                "name": "run_bash",
+                "content": '{"ok":true,"status":"success","stdout":"/tmp\\n"}',
+            },
+        ]
+        normalized_messages = copy.deepcopy(openai_style_messages)
+        normalized_messages[2]["tool_calls"][0]["function"]["arguments"] = {
+            "code": "pwd"
+        }
+
+        openai_render_tokens = _render_nemotron_tokens(
+            openai_style_messages,
+            add_generation_prompt=False,
+            tools=tools,
+        )
+        normalized_render_tokens = _render_nemotron_tokens(
+            normalized_messages,
+            add_generation_prompt=False,
+            tools=tools,
+        )
+
+        # Perf-only proxy: if the production render path changes how assistant
+        # tool-call history round-trips, the first cached tool follow-up loses a
+        # native prefix-cache hit even though correctness still holds.
+        self.assertEqual(openai_render_tokens, normalized_render_tokens)
 
 
 if __name__ == "__main__":
