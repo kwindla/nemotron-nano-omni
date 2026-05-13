@@ -419,6 +419,7 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
         messages: list[dict[str, Any]],
         conversation_id: str | None,
         require_cache: bool = False,
+        committed_boundary_messages: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         payload: dict[str, Any] = {
             "model": service._settings.model,
@@ -432,7 +433,15 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
             if snapshot.tool_choice is not None:
                 payload["tool_choice"] = copy.deepcopy(snapshot.tool_choice)
         if conversation_id is not None:
+            boundary_source = (
+                committed_boundary_messages
+                if committed_boundary_messages is not None
+                else messages
+            )
             payload["conversation_id"] = conversation_id
+            payload["conversation_committed_message_count"] = len(
+                service._committable_messages_after_success(boundary_source)
+            )
             if require_cache:
                 payload["conversation_require_cache"] = True
         if service._settings.max_tokens is not None:
@@ -2148,6 +2157,79 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
             [
                 {"role": "system", "content": "sys"},
                 {"role": "user", "content": "Run pwd."},
+            ],
+        )
+
+    async def test_next_user_turn_after_successful_tool_followup_reuses_same_conversation_id_without_rotation(
+        self,
+    ) -> None:
+        service = self._make_service(
+            system_instruction="sys",
+            conversation_id="conv-tool-next-user",
+        )
+        await self._prime_service_for_tools(service)
+        context = self._context_with_messages([{"role": "user", "content": "Run pwd."}])
+        self._attach_assistant(service, context, auto_reenter=True)
+        payloads: list[dict[str, Any]] = []
+        tool_result = {
+            "ok": True,
+            "status": "success",
+            "summary": "Command completed successfully.",
+            "command": "pwd",
+            "exit_code": 0,
+            "timed_out": False,
+            "stdout": "/repo\n",
+            "stderr": "",
+        }
+
+        async def fake_stream(payload, **kwargs):
+            payloads.append(copy.deepcopy(payload))
+            if len(payloads) == 1:
+                return ChatCompletionPassResult(
+                    output_text="Checking.",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {"name": "run_bash", "arguments": '{"code":"pwd"}'},
+                        }
+                    ],
+                    first_token=False,
+                )
+            if len(payloads) == 2:
+                await service._push_llm_text("Done.")
+                return ChatCompletionPassResult(
+                    output_text="Done.",
+                    tool_calls=[],
+                    first_token=False,
+                )
+            await service._push_llm_text("It printed the repo path.")
+            return ChatCompletionPassResult(
+                output_text="It printed the repo path.",
+                tool_calls=[],
+                first_token=False,
+            )
+
+        async def fake_run_bash_tool(code: str, *, tool_call_id: str):
+            return copy.deepcopy(tool_result)
+
+        service._stream_completion_pass = fake_stream  # type: ignore[method-assign]
+        service._run_bash_tool = fake_run_bash_tool  # type: ignore[method-assign]
+        await service.process_frame(LLMContextFrame(context), FrameDirection.DOWNSTREAM)
+        await self._wait_until(
+            lambda: len(payloads) == 2
+            and context.get_messages()[-1] == {"role": "assistant", "content": "Done."}
+        )
+
+        context.add_message({"role": "user", "content": "What did it print?"})
+        await self._run_context_frame(service, context)
+
+        self.assertEqual(payloads[2]["conversation_id"], "conv-tool-next-user")
+        self.assertIs(payloads[2]["conversation_require_cache"], True)
+        self.assertEqual(payloads[2]["conversation_committed_message_count"], 2)
+        self.assertEqual(
+            payloads[2]["messages"],
+            [
                 {
                     "role": "assistant",
                     "content": "Checking.",
@@ -2164,6 +2246,124 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                     "content": json.dumps(tool_result, ensure_ascii=True),
                     "tool_call_id": "call_1",
                 },
+                {"role": "assistant", "content": "Done."},
+                {"role": "user", "content": "What did it print?"},
+            ],
+        )
+        self.assertEqual(
+            service.committed_messages,
+            [
+                {"role": "system", "content": "sys"},
+                {"role": "user", "content": "Run pwd."},
+            ],
+        )
+
+    async def test_followup_user_turn_during_provisional_sync_tool_pass_keeps_committed_boundary_at_anchor_user(
+        self,
+    ) -> None:
+        service = self._make_service(
+            system_instruction="sys",
+            conversation_id="conv-provisional-followup",
+        )
+        await self._prime_service_for_tools(service)
+
+        initial_context = self._context_with_messages(
+            [{"role": "user", "content": "Run exactly: echo spark text four"}]
+        )
+        initial_snapshot = service._normalized_request_snapshot(initial_context)
+        self.assertIsNotNone(initial_snapshot)
+        built_initial = service._build_payload(initial_snapshot)
+        self.assertIsNotNone(built_initial)
+        _initial_payload, initial_full_messages = built_initial
+
+        anchor_user_key = service._latest_user_turn_key_from_messages(initial_full_messages)
+        service.conversation_commit_boundary_tracker.mark_provisional_batch(
+            batch_id="batch-1",
+            user_turn_key=anchor_user_key,
+        )
+
+        tool_result = {
+            "ok": True,
+            "status": "success",
+            "summary": "Command completed successfully.",
+            "command": "echo spark text four",
+            "exit_code": 0,
+            "timed_out": False,
+            "stdout": "spark text four\n",
+            "stderr": "",
+        }
+        full_messages_with_followup_user = initial_full_messages + [
+            {
+                "role": "assistant",
+                "content": "",
+                "tool_calls": [
+                    {
+                        "id": "call_1",
+                        "type": "function",
+                        "function": {
+                            "name": "run_bash",
+                            "arguments": '{"code":"echo spark text four"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "content": json.dumps(tool_result, ensure_ascii=True),
+                "tool_call_id": "call_1",
+            },
+            {
+                "role": "user",
+                "content": "What exact words did the previous command print? Reply with those words only.",
+            },
+        ]
+        committed_after_success = service._committable_messages_after_success(
+            full_messages_with_followup_user
+        )
+        self.assertEqual(committed_after_success, initial_full_messages)
+
+        service.committed_messages = copy.deepcopy(committed_after_success)
+        service._conversation_cache_committed = True
+        service._committed_cache_shape_fingerprint = initial_snapshot.cache_shape_fingerprint
+
+        followup_context = self._context_with_messages(
+            [
+                {"role": "user", "content": "Run exactly: echo spark text four"},
+                {
+                    "role": "user",
+                    "content": (
+                        "What exact words did the previous command print? "
+                        "Reply with those words only."
+                    ),
+                },
+            ]
+        )
+        followup_snapshot = service._normalized_request_snapshot(followup_context)
+        self.assertIsNotNone(followup_snapshot)
+
+        built_followup = service._build_payload(followup_snapshot)
+        self.assertIsNotNone(built_followup)
+        followup_payload, _followup_full_messages = built_followup
+
+        self.assertEqual(
+            followup_payload["conversation_id"],
+            "conv-provisional-followup",
+        )
+        self.assertIs(followup_payload["conversation_require_cache"], True)
+        self.assertEqual(
+            followup_payload["conversation_committed_message_count"],
+            len(initial_full_messages),
+        )
+        self.assertEqual(
+            followup_payload["messages"],
+            [
+                {
+                    "role": "user",
+                    "content": (
+                        "What exact words did the previous command print? "
+                        "Reply with those words only."
+                    ),
+                }
             ],
         )
 
@@ -2656,6 +2856,7 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 messages=expected_cached_full[-2:],
                 conversation_id="conv-golden-cached",
                 require_cache=True,
+                committed_boundary_messages=expected_cached_full,
             ),
         )
 
@@ -2742,6 +2943,7 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 messages=expected_tool_full[-2:],
                 conversation_id="conv-golden-tool",
                 require_cache=True,
+                committed_boundary_messages=expected_tool_full,
             ),
         )
 
@@ -2832,6 +3034,7 @@ class NemotronOmniAlignedTests(unittest.IsolatedAsyncioTestCase):
                 messages=expected_interrupted_full[-1:],
                 conversation_id="conv-golden-interrupt",
                 require_cache=True,
+                committed_boundary_messages=expected_interrupted_full,
             ),
         )
 

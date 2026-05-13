@@ -1,7 +1,7 @@
 # Conversation-cache `conversation_id` rotation on interrupted tool turns
 
-**Status:** known, graceful degradation (not a correctness bug). A clean fix needs a
-coordinated client + vLLM-engine change — see "Why the obvious fix didn't work".
+**Status:** fixed in this workspace. The clean fix was a coordinated client +
+vLLM-serving + vLLM-scheduler change; see "What the fix does".
 
 **Symptom:** during a long voice session, the bot occasionally logs
 
@@ -32,36 +32,24 @@ NemotronOmniAudioLLMService#0: committed-prefix diverged before rotation:
 The client (`NemotronOmniAudioLLMService`) keeps a mirror of "what messages the
 conversation-cache checkpoint covers" in `self.committed_messages`. After every
 successful request it snapshots that mirror from the **full transcript that was
-just sent** (`src/nemotron_voice/services/nvidia/nemotron_omni.py:1441`):
-
-```python
-# _process_context, after a successful response:
-self.committed_messages = copy.deepcopy(full_messages)
-```
+just sent.
 
 The next request is allowed to reuse the cache only if `committed_messages` is a
-**prefix** of the new full transcript
-(`src/nemotron_voice/services/nvidia/nemotron_omni.py:1039`):
+**prefix** of the new full transcript.
 
-```python
-committed_prefix_matches = current_full[: len(self.committed_messages)] == self.committed_messages
-...
-non_append_rewrite = self._conversation_cache_committed and not committed_prefix_matches
-if fingerprint_changed or non_append_rewrite:
-    ...
-    self._rotate_conversation_cache_projection(reason="non-append committed-prefix rewrite")
-```
+The first fix moved that durable boundary to the latest `user` row, which
+solved the simple "re-entry transcript ends at `assistant(tool_calls)` +
+`tool(result)`" case. The live bot still had one more edge: a newer **user**
+row can already be present in the transcript while those earlier tool rows are
+still provisional. In that shape, "latest user row" is still too optimistic,
+because committing through that later user implicitly commits the provisional
+tool rows that sit before it.
 
-The bug: a **tool re-entry request** carries provisional rows that
-`NemotronAssistantAggregator` may later **remove** from the live transcript
-(when the bot is interrupted mid-turn). If the re-entry's response completes
-*before* the interruption lands, the `committed_messages` snapshot has already
-captured those provisional rows — and once the aggregator removes them, the live
-transcript is no longer a prefix-extension of `committed_messages`. `_build_payload`
-correctly detects that and rotates.
-
-So: `committed_messages` is being anchored to rows that are **not stable** (they
-can disappear), instead of to rows that *are* stable (the `user` rows).
+The real invariant is: the durable checkpoint may advance only through the
+earliest user row whose following assistant/tool rows are still provisional.
+The client therefore has to track unresolved sync-tool passes explicitly and use
+that explicit stable boundary when it decides what `committed_messages` should
+be after success.
 
 ---
 
@@ -171,10 +159,9 @@ follow a tool turn.
 ## Repro
 
 `proj-2026-05-11-2008/repro_conversation_cache_rotation.py` is a self-contained
-pytest test that reproduces the rotation **deterministically** — it sets up the
-state described above (a `committed_messages` snapshot that includes the
-provisional tool rows) and then drives the post-interruption transcript through
-`_build_payload`, the same code path the live bot uses.
+pytest regression that reconstructs the post-re-entry state under the fixed
+contract and then proves the interrupted follow-up reuses the same
+`conversation_id` with a one-message user suffix.
 
 Run it:
 
@@ -188,71 +175,57 @@ PYTHONPATH=src .venv-pipecat/bin/python -m pytest \
 The test:
 
 1. Builds a `NemotronOmniAudioLLMService(conversation_id="repro-conv")`.
-2. Puts the service into the state it would be in *right after step (4) above*:
-   `service._conversation_cache_committed = True` and
-   `service.committed_messages = [system, user("Run pwd"), assistant("", tool_calls=[run_bash]), tool(result)]`
-   — i.e. the committed mirror includes the two provisional rows. (It also copies
-   the request's `cache_shape_fingerprint` onto `service._committed_cache_shape_fingerprint`
-   so the only thing that can trigger a rotation is the prefix mismatch, not a
-   shape change.)
+2. Reconstructs the tool re-entry transcript
+   `[system, user("Run pwd"), assistant("", tool_calls=[run_bash]), tool(result)]`
+   and runs it through the same "committable after success" rule the service now
+   uses. The durable boundary truncates back to `[system, user("Run pwd")]`.
+   (It also copies the request's `cache_shape_fingerprint` onto
+   `service._committed_cache_shape_fingerprint` so the only thing under test is
+   the committed-prefix behavior.)
 3. Builds the *post-interruption* `LLMContext`: `[user("Run pwd"), user("What did the command print?")]`
    — the `assistant(tool_calls)` and `tool` rows were dropped by
    `NemotronAssistantAggregator._drop_all_provisional_sync_tool_rows`, and the new
    user turn was appended.
 4. Calls `service._build_payload(service._normalized_request_snapshot(context))`
    (the exact call `_process_context` makes) and asserts:
-   * `service._conversation_id` changed (a rotation occurred), and
-   * the resulting payload has **no** `conversation_require_cache` (it went out as
-     a full-history rebase).
-   It also prints the `committed-prefix diverged` diagnostic so you can see the
-   same field dump the live bot logs.
+   * `service._conversation_id` stays the same,
+   * the resulting payload keeps `conversation_require_cache=true`, and
+   * the payload suffix is just the new user row.
 
 Step 2 is the only "synthetic" part; everything from step 3 on is real production
-code. Steps 1–4 of "how a rotation happens" above are what produces that
-`committed_messages` value in a live session — the repro skips replaying the tool
-round (which needs the full aggregator + a registered tool handler) and just
-asserts the value it lands on, then exercises the divergence path verbatim.
+code. The repro still bypasses the live tool round, but it now verifies the new
+stable-boundary rule directly and then exercises the exact `_build_payload`
+branch that used to rotate.
 
 ---
 
-## Why the obvious fix didn't work (and what a real fix needs)
+## What the fix does
 
-The natural fix is to anchor the cache-commit boundary at the **last `user`
-row** — user rows are the one row class the assistant aggregator never rewrites
-or removes after the fact, so `committed_messages` stays append-only across tool
-turns. Concretely: in `_process_context`, set
-`committed_messages = full_messages[: last_user_index + 1]`; and on the vLLM side,
-truncate `committed_messages_after_success` the same way before publishing the
-checkpoint (`render(messages[:last_user+1], gen_prompt=False)` is still a token
-prefix of the full rendered prompt, so attach validation is unaffected). The two
-mirrors must move together because the server reconstructs each suffix request by
-prepending its own `committed_messages` — if the client truncates and the server
-does not, every following turn 409s and rebases.
+The durable cache boundary is now **client-authoritative**:
 
-This was prototyped (all 66 service unit tests + 56 vLLM-side unit tests passed)
-but **had to be reverted**: with the truncation, the committed boundary does *not*
-advance during tool re-entries (it stays pinned at the same user row), so the
-vLLM publish path is asked to "publish a checkpoint at a token position it
-already has a checkpoint for". The conversation-cache scheduler doesn't handle
-that gracefully — the engine wedges (`Running: 0 reqs, Waiting: 1 req`, EngineCore
-spinning at ~80% CPU, no further progress) and even a trivial follow-up request
-times out.
+* `NemotronOmniAudioLLMService` tracks unresolved sync-tool passes explicitly.
+  While any provisional pass is still live, the durable boundary stays pinned at
+  that pass's anchor `user` row instead of advancing through later user rows
+  that merely happen to be present in the transcript.
+* The client sends vLLM the exact
+  `conversation_committed_message_count` it wants published after a successful
+  pass, so vLLM no longer has to infer the durable boundary from "latest user
+  row" heuristics.
+* `NemotronAssistantAggregator` clears those provisional-batch markers only when
+  the pass is truly committed (`LLMFullResponseEndFrame` with no interruption)
+  or explicitly dropped on interruption/cancellation.
 
-A real fix therefore needs an engine-aware change, e.g. one or more of:
+The earlier same-boundary vLLM fixes are still required and still present:
 
-* In `_publish_conversation_response` (and the engine commit), **skip the publish**
-  when the new `committed_checkpoint_token_count` equals the existing checkpoint's
-  token count (and the messages are identical) — i.e. don't re-publish a checkpoint
-  that wouldn't move.
-* Make the conversation-cache scheduler tolerate a "publish at an already-cached
-  position" as a no-op (the block-copy path appears to be where it hangs —
-  `Attached conversation cache ... copies=N`).
-* Audit how `mamba_cache_mode='align'` snapshots the "terminal-state checkpoint"
-  for a position in the *middle* of the rendered prompt (the truncated boundary is
-  always mid-prompt; the current design's boundary — the full request prefix minus
-  the generation prompt — is at the very end of the prompt).
+* `_publish_conversation_response` accepts an `advanced_checkpoint=false`
+  publish result as success when it exactly reuses the already-committed
+  checkpoint length.
+* `Scheduler._cap_conversation_checkpoint_schedule()` no longer returns `0`
+  when the logical boundary is already fully attached/computed; it keeps
+  scheduling the request normally and lets the later publish no-op against the
+  existing checkpoint.
 
-Until then, the rotation stays as graceful degradation: correctness is preserved,
-and the cost is one full-history re-render per occurrence (~1–2 per 20-turn
-tool-heavy run). The `committed-prefix diverged` diagnostic remains in place so any
-recurrence is self-explanatory in the logs.
+Together, that means interrupted tool turns stay append-only from the durable
+boundary's point of view even when a newer user row is already in the context,
+so the bot stops rotating `conversation_id` on this path and same-boundary tool
+re-entries still avoid wedging the engine.

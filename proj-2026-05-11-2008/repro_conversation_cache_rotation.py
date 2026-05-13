@@ -1,4 +1,4 @@
-"""Deterministic repro for the conversation_id rotation on interrupted tool turns.
+"""Deterministic regression for interrupted-tool cache reuse.
 
 See proj-2026-05-11-2008/conversation-cache-rotation-issue.md for the full
 write-up. Run it with:
@@ -6,24 +6,21 @@ write-up. Run it with:
     PYTHONPATH=src .venv-pipecat/bin/python -m pytest \
         proj-2026-05-11-2008/repro_conversation_cache_rotation.py -s -v
 
-What this reproduces
---------------------
-`NemotronOmniAudioLLMService.committed_messages` is the client's mirror of "what
-messages the conversation-cache checkpoint covers". `_process_context` snapshots
-it from the full transcript that was just sent
-(`nemotron_omni.py: self.committed_messages = copy.deepcopy(full_messages)`).
-A tool *re-entry* request carries the provisional `assistant(tool_calls)` and
-`tool(result)` rows that `NemotronAssistantAggregator` added to the live context.
-If the re-entry's response completes before the bot gets interrupted, that
-snapshot has already captured those provisional rows. When the interruption then
-removes them (`NemotronAssistantAggregator._drop_all_provisional_sync_tool_rows`)
-and a new user turn arrives, the live transcript is no longer a prefix-extension
-of `committed_messages`, so `_build_payload` rotates the `conversation_id`.
+What this asserts
+-----------------
+The durable conversation-cache boundary is pinned to the earliest anchor `user`
+row of any still-provisional sync-tool pass. A tool re-entry may render
+provisional `assistant(tool_calls)` and `tool(result)` rows, and a later `user`
+row may already be present in the transcript, but those rows are not promoted
+into `NemotronOmniAudioLLMService.committed_messages` until the provisional pass
+fully settles. So if the turn is interrupted and those provisional rows are
+removed, the next request still sees an append-only user suffix and reuses the
+same `conversation_id`.
 
-This script sets the service into the post-re-entry state (committed_messages
-includes the provisional rows), then feeds the post-interruption transcript
-through `_build_payload` -- the exact call `_process_context` makes -- and shows
-the rotation happen.
+This script reconstructs the post-re-entry state, verifies that the durable
+boundary truncates back to the stable anchor `user` row, then feeds the
+post-interruption transcript through `_build_payload` -- the exact call
+`_process_context` makes -- and shows that no rotation occurs.
 """
 
 from __future__ import annotations
@@ -89,7 +86,7 @@ def _make_service() -> NemotronOmniAudioLLMService:
     return service
 
 
-def test_committed_prefix_diverges_after_interrupted_tool_turn() -> None:
+def test_interrupted_tool_turn_keeps_same_conversation_id_under_user_anchored_commit() -> None:
     service = _make_service()
     assert service._conversation_id == "repro-conv"
 
@@ -103,13 +100,13 @@ def test_committed_prefix_diverges_after_interrupted_tool_turn() -> None:
     #   3. tool runs; the tool row's content is filled in with the result.
     #   4. tool follow-up (re-entry) request goes out; its full transcript is
     #      [system, user("Run pwd"), ASSISTANT_TOOL_CALL_ROW, TOOL_RESULT_ROW];
-    #      the response completes -> _process_context sets
-    #          committed_messages = [system, user("Run pwd"),
-    #                                ASSISTANT_TOOL_CALL_ROW, TOOL_RESULT_ROW]
+    #      the response completes, but the durable boundary stays pinned at
+    #          committed_messages = [system, user("Run pwd")]
+    #      because that sync-tool pass is still provisional.
     #
     # We build (1)'s normalized transcript via the real code path so the leading
     # rows are exactly what the normalizer produces, then append the two
-    # provisional rows to get (4)'s committed_messages.
+    # provisional rows to get (4)'s full re-entry transcript.
     pre_tool_context = LLMContext(messages=[{"role": "user", "content": "Run pwd"}])
     pre_tool_snapshot = service._normalized_request_snapshot(pre_tool_context)
     assert pre_tool_snapshot is not None
@@ -119,10 +116,14 @@ def test_committed_prefix_diverges_after_interrupted_tool_turn() -> None:
     # normalized_full_1 == [{"role":"system",...}, {"role":"user","content":"Run pwd"}]
     assert [m["role"] for m in normalized_full_1] == ["system", "user"]
 
-    committed_after_reentry = normalized_full_1 + [
+    reentry_full_messages = normalized_full_1 + [
         copy.deepcopy(ASSISTANT_TOOL_CALL_ROW),
         copy.deepcopy(TOOL_RESULT_ROW),
     ]
+    committed_after_reentry = service._committable_messages_after_success(
+        reentry_full_messages
+    )
+    assert committed_after_reentry == normalized_full_1
     service.committed_messages = copy.deepcopy(committed_after_reentry)
     service._conversation_cache_committed = True
     # Pin the committed cache-shape fingerprint to the request shape so the only
@@ -174,24 +175,66 @@ def test_committed_prefix_diverges_after_interrupted_tool_turn() -> None:
         f"[repro] payload has conversation_require_cache? "
         f"{'conversation_require_cache' in payload_2}"
     )
-    print(f"[repro] payload sent {len(payload_2['messages'])} messages (full-history rebase)")
+    print(f"[repro] payload sent {len(payload_2['messages'])} message(s)")
 
-    # --- Assertions: the rotation happened, and the request went out as a
-    # full-history rebase (no cache reuse). -----------------------------------
-    assert conversation_id_after != conversation_id_before, (
-        "expected a conversation_id rotation because committed_messages "
-        f"({[m['role'] for m in service.committed_messages]}) "  # noqa: E501 -- diagnostic only
-        "is no longer a prefix of the live transcript "
-        f"({[m['role'] for m in current_full_preview]})"
+    # --- Assertions: no rotation happened, and the request stayed a cache-
+    # reusing append of the new user row. -------------------------------------
+    assert conversation_id_after == conversation_id_before
+    assert payload_2["conversation_id"] == conversation_id_before
+    assert payload_2["conversation_require_cache"] is True
+    assert payload_2["messages"] == [
+        {"role": "user", "content": "What did the command print?"},
+    ]
+    assert service.committed_messages == committed_after_reentry
+    assert service._conversation_cache_committed is True
+
+
+def test_followup_user_turn_during_provisional_tool_pass_keeps_same_conversation_id() -> None:
+    service = _make_service()
+    pre_tool_context = LLMContext(messages=[{"role": "user", "content": "Run pwd"}])
+    pre_tool_snapshot = service._normalized_request_snapshot(pre_tool_context)
+    assert pre_tool_snapshot is not None
+    built = service._build_payload(pre_tool_snapshot)
+    assert built is not None
+    _payload_1, normalized_full_1 = built
+    anchor_user_key = service._latest_user_turn_key_from_messages(normalized_full_1)
+    service.conversation_commit_boundary_tracker.mark_provisional_batch(
+        batch_id="batch-1",
+        user_turn_key=anchor_user_key,
     )
-    assert "conversation_require_cache" not in payload_2, (
-        "after rotation the request must go out as a full-history rebase, "
-        "not a cache-reusing suffix"
+
+    overlapping_full_messages = normalized_full_1 + [
+        copy.deepcopy(ASSISTANT_TOOL_CALL_ROW),
+        copy.deepcopy(TOOL_RESULT_ROW),
+        {"role": "user", "content": "What did the command print?"},
+    ]
+    committed_during_overlap = service._committable_messages_after_success(
+        overlapping_full_messages
     )
-    # And the committed mirror is reset (it will be re-established from this
-    # rebase's response).
-    assert service.committed_messages == []
-    assert service._conversation_cache_committed is False
+    assert committed_during_overlap == normalized_full_1
+    service.committed_messages = copy.deepcopy(committed_during_overlap)
+    service._conversation_cache_committed = True
+    service._committed_cache_shape_fingerprint = pre_tool_snapshot.cache_shape_fingerprint
+
+    post_drop_context = LLMContext(
+        messages=[
+            {"role": "user", "content": "Run pwd"},
+            {"role": "user", "content": "What did the command print?"},
+        ]
+    )
+    post_drop_snapshot = service._normalized_request_snapshot(post_drop_context)
+    assert post_drop_snapshot is not None
+    built_2 = service._build_payload(post_drop_snapshot)
+    assert built_2 is not None
+    payload_2, _normalized_full_2 = built_2
+
+    assert service._conversation_id == "repro-conv"
+    assert payload_2["conversation_id"] == "repro-conv"
+    assert payload_2["conversation_require_cache"] is True
+    assert payload_2["conversation_committed_message_count"] == len(normalized_full_1)
+    assert payload_2["messages"] == [
+        {"role": "user", "content": "What did the command print?"},
+    ]
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience for `python repro_...py`

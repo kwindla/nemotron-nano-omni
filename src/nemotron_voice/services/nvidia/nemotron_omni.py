@@ -189,6 +189,26 @@ class InterruptedToolPassSignal:
 
 
 @dataclass
+class ConversationCommitBoundaryTracker:
+    _provisional_batch_user_keys: dict[str, str | None] = field(default_factory=dict)
+
+    def mark_provisional_batch(self, *, batch_id: str, user_turn_key: str | None) -> None:
+        self._provisional_batch_user_keys[batch_id] = user_turn_key
+
+    def clear_provisional_batch(self, batch_id: str | None) -> None:
+        if batch_id is None:
+            return
+        self._provisional_batch_user_keys.pop(batch_id, None)
+
+    def provisional_user_turn_keys(self) -> tuple[str, ...]:
+        return tuple(
+            user_turn_key
+            for user_turn_key in self._provisional_batch_user_keys.values()
+            if user_turn_key is not None
+        )
+
+
+@dataclass
 class ChatCompletionPassResult:
     output_text: str
     tool_calls: list[dict[str, Any]]
@@ -257,10 +277,12 @@ class NemotronAssistantAggregator(LLMAssistantAggregator):
         context: LLMContext,
         *,
         interrupted_tool_pass_signal: InterruptedToolPassSignal | None = None,
+        conversation_commit_boundary_tracker: ConversationCommitBoundaryTracker | None = None,
         **kwargs,
     ):
         super().__init__(context, **kwargs)
         self._interrupted_tool_pass_signal = interrupted_tool_pass_signal
+        self._conversation_commit_boundary_tracker = conversation_commit_boundary_tracker
         self._pending_exact_assistant_message: dict[str, Any] | None = None
         self._pending_exact_assistant_batch_id: str | None = None
         self._current_exact_response_suppressed = False
@@ -437,6 +459,10 @@ class NemotronAssistantAggregator(LLMAssistantAggregator):
             sync_pass.assistant_row = None
             if sync_pass in self._provisional_exact_sync_passes:
                 self._provisional_exact_sync_passes.remove(sync_pass)
+            if self._conversation_commit_boundary_tracker is not None:
+                self._conversation_commit_boundary_tracker.clear_provisional_batch(
+                    sync_pass.batch_id
+                )
 
     async def _handle_interruptions(self, frame: InterruptionFrame):
         removed_rows = self._drop_all_provisional_sync_tool_rows()
@@ -483,6 +509,10 @@ class NemotronAssistantAggregator(LLMAssistantAggregator):
                 continue
             self._provisional_exact_sync_passes.remove(sync_pass)
             sync_pass.provisional_rows.clear()
+            if self._conversation_commit_boundary_tracker is not None:
+                self._conversation_commit_boundary_tracker.clear_provisional_batch(
+                    sync_pass.batch_id
+                )
 
     def _drop_all_provisional_sync_tool_rows(self) -> bool:
         rows_to_remove: list[dict[str, Any]] = []
@@ -491,6 +521,10 @@ class NemotronAssistantAggregator(LLMAssistantAggregator):
             sync_pass.provisional_rows.clear()
             sync_pass.tool_rows_by_id.clear()
             sync_pass.assistant_row = None
+            if self._conversation_commit_boundary_tracker is not None:
+                self._conversation_commit_boundary_tracker.clear_provisional_batch(
+                    sync_pass.batch_id
+                )
         self._provisional_exact_sync_passes = []
         if not rows_to_remove:
             return False
@@ -547,6 +581,7 @@ class NemotronOmniAudioLLMService(LLMService):
         bash_tool_max_output_chars: int = 12000,
         bash_tool_max_rounds: int = 3,
         bash_tool_event_sender: Callable[[dict[str, Any]], Awaitable[None]] | None = None,
+        conversation_commit_boundary_tracker: ConversationCommitBoundaryTracker | None = None,
         **kwargs,
     ):
         """Initialize the service.
@@ -610,6 +645,11 @@ class NemotronOmniAudioLLMService(LLMService):
         self._bash_tool_max_output_chars = bash_tool_max_output_chars
         self._bash_tool_max_rounds = bash_tool_max_rounds
         self._bash_tool_event_sender = bash_tool_event_sender
+        self._conversation_commit_boundary_tracker = (
+            conversation_commit_boundary_tracker
+            if conversation_commit_boundary_tracker is not None
+            else ConversationCommitBoundaryTracker()
+        )
         # Default OFF. The plan (step 5) called for flipping this on, but that
         # premise was wrong: historical-audio stripping is computed *relative to
         # the latest user row*, so a user row that was kept (with audio) in the
@@ -635,6 +675,7 @@ class NemotronOmniAudioLLMService(LLMService):
         self._current_batch_id: str | None = None
         self._running_batch_id: str | None = None
         self._pending_followup_batch_id: str | None = None
+        self._pending_exact_assistant_message_for_batch: dict[str, Any] | None = None
         self._stale_batch_ids: set[str] = set()
         self._tool_batch_states: dict[str, ToolBatchState] = {}
         trace_dir = os.getenv("NEMOTRON_OMNI_TRACE_DIR")
@@ -647,6 +688,10 @@ class NemotronOmniAudioLLMService(LLMService):
                 self._handle_run_bash_function_call,
                 cancel_on_interruption=True,
             )
+
+    @property
+    def conversation_commit_boundary_tracker(self) -> ConversationCommitBoundaryTracker:
+        return self._conversation_commit_boundary_tracker
 
     def can_generate_metrics(self) -> bool:
         """Return whether the service emits processing, TTFB, and usage metrics."""
@@ -802,6 +847,40 @@ class NemotronOmniAudioLLMService(LLMService):
         if snapshot is None:
             return None
         return self._latest_user_turn_key_from_messages(self._with_system_message(snapshot.messages))
+
+    def _committable_messages_after_success(
+        self,
+        full_messages: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        provisional_user_turn_keys = (
+            self._conversation_commit_boundary_tracker.provisional_user_turn_keys()
+        )
+        if provisional_user_turn_keys:
+            provisional_user_turn_key_set = set(provisional_user_turn_keys)
+            for index, message in enumerate(full_messages):
+                if message.get("role") != "user":
+                    continue
+                message_key = json.dumps(
+                    copy.deepcopy(message),
+                    ensure_ascii=True,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if message_key in provisional_user_turn_key_set:
+                    return copy.deepcopy(full_messages[: index + 1])
+
+        # Advance the durable conversation-cache boundary only through the
+        # latest user row. Rows appended after that user belong to the active
+        # assistant turn; sync-tool re-entry can still rewrite or delete them
+        # before the next user turn settles the transcript.
+        latest_user_index = -1
+        for index in range(len(full_messages) - 1, -1, -1):
+            if full_messages[index].get("role") == "user":
+                latest_user_index = index
+                break
+        if latest_user_index < 0:
+            return []
+        return copy.deepcopy(full_messages[: latest_user_index + 1])
 
     def _reset_turn_tool_state(self, latest_user_key: str | None) -> None:
         self._current_turn_user_key = latest_user_key
@@ -1073,6 +1152,9 @@ class NemotronOmniAudioLLMService(LLMService):
         }
         if self._conversation_id is not None:
             payload["conversation_id"] = self._conversation_id
+            payload["conversation_committed_message_count"] = len(
+                self._committable_messages_after_success(current_full)
+            )
             if (
                 self._conversation_cache_committed
                 and self._committed_cache_shape_fingerprint == snapshot.cache_shape_fingerprint
@@ -1438,7 +1520,15 @@ class NemotronOmniAudioLLMService(LLMService):
         if result is None:
             return
         if self._conversation_id is not None:
-            self.committed_messages = copy.deepcopy(full_messages)
+            committed_message_count = payload.get("conversation_committed_message_count")
+            if isinstance(committed_message_count, int):
+                self.committed_messages = copy.deepcopy(
+                    full_messages[:committed_message_count]
+                )
+            else:
+                self.committed_messages = self._committable_messages_after_success(
+                    full_messages
+                )
             self._conversation_cache_committed = True
             self._committed_cache_shape_fingerprint = snapshot.cache_shape_fingerprint
         if not result.tool_calls:
@@ -1477,8 +1567,8 @@ class NemotronOmniAudioLLMService(LLMService):
             )
             return
 
-        await self.push_frame(
-            NemotronExactAssistantMessageFrame(message=copy.deepcopy(exact_assistant_message))
+        self._pending_exact_assistant_message_for_batch = copy.deepcopy(
+            exact_assistant_message
         )
         await self.run_function_calls(function_calls)
 
@@ -1885,6 +1975,18 @@ class NemotronOmniAudioLLMService(LLMService):
             user_turn_key=self._current_turn_user_key,
             runner_items=serial_runner_items,
         )
+        self._conversation_commit_boundary_tracker.mark_provisional_batch(
+            batch_id=batch_id,
+            user_turn_key=self._current_turn_user_key,
+        )
+        if self._pending_exact_assistant_message_for_batch is not None:
+            await self.push_frame(
+                NemotronExactAssistantMessageFrame(
+                    message=copy.deepcopy(self._pending_exact_assistant_message_for_batch),
+                    batch_id=batch_id,
+                )
+            )
+            self._pending_exact_assistant_message_for_batch = None
         await super()._run_sequential_function_calls(serial_runner_items)
 
     async def _sequential_runner_handler(self):

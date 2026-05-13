@@ -565,6 +565,7 @@ async def run_bot(transport: BaseTransport, runner_args: RunnerArguments):
         NemotronAssistantAggregator(
             context,
             interrupted_tool_pass_signal=interrupted_tool_pass_signal,
+            conversation_commit_boundary_tracker=llm.conversation_commit_boundary_tracker,
         )
         if enable_bash_tool
         else LLMAssistantAggregator(context)
